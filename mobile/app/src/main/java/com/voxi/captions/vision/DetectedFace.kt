@@ -16,6 +16,8 @@ import com.voxi.captions.model.Speaker
  *    (-1 mientras no se ha asignado).
  *  - [speaker]: hablante (voz) asociado a esta cara, para pintar su contorno con
  *    el color correcto y para ayudar a la diarización (o null si aún no se sabe).
+ *  - [contour]: puntos del óvalo del rostro (FACE_OVAL de ML Kit) normalizados
+ *    como [x0,y0,x1,y1,...], para dibujar la silueta/aura del que habla.
  */
 data class DetectedFace(
     val cx: Float,         // centro X normalizado (0 izquierda, 1 derecha)
@@ -26,6 +28,7 @@ data class DetectedFace(
     val signature: FloatArray? = null,
     val trackId: Int = -1,
     val speaker: Speaker? = null,
+    val contour: FloatArray? = null,
 ) {
     // equals/hashCode ignoran la firma (FloatArray) para no comparar arreglos por
     // referencia; basta la geometría y los ids para detectar cambios de cuadro.

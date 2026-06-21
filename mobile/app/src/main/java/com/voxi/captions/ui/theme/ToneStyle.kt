@@ -4,8 +4,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import com.voxi.captions.model.Tone
 
-/** Tamaño base del subtítulo en sp; picos hasta ~34 sp al gritar (spec §8). */
-const val BUBBLE_BASE_SP = 22f
+/** Tamaño base del subtítulo en sp; picos hasta ~28 sp al gritar (spec §8). */
+const val BUBBLE_BASE_SP = 18f
 
 /** Estilo visual derivado de un [Tone] (spec §5, tabla de mapeo). */
 data class ToneStyle(

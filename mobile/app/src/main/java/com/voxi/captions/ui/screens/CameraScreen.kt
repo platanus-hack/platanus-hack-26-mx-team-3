@@ -8,7 +8,11 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -39,10 +43,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size as GeoSize
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -53,6 +58,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.voxi.captions.ui.components.ComposeBar
 import com.voxi.captions.ui.components.SmartReplyChips
+import com.voxi.captions.ui.components.VoxiBadge
 import com.voxi.captions.ui.theme.VoxiBg
 import com.voxi.captions.ui.theme.VoxiMint
 import com.voxi.captions.ui.theme.VoxiSlate
@@ -174,10 +180,14 @@ private fun CaptionOverlay(
     val active = state.activeFace
 
     BoxWithConstraints(modifier = modifier) {
-        // Contorno de color por cara (spec 6/8): cada persona se ilumina con el
-        // color de su hablante; la que esta hablando se resalta mas fuerte. Asi se
-        // distingue quien es quien aunque varias personas esten en cuadro.
-        FaceOutlines(faces = state.faces, active = active, modifier = Modifier.fillMaxSize())
+        // Aura/silueta (spec 6/8): UNICAMENTE la cara que esta hablando se ilumina,
+        // como un halo del color de su hablante. Las caras en reposo no llevan
+        // ningun marco, para no saturar el encuadre.
+        FaceAura(
+            face = active,
+            color = active?.let { speakerColor(it.speaker ?: state.partialSpeaker) },
+            modifier = Modifier.fillMaxSize(),
+        )
 
         val text: String
         val cx: Float
@@ -277,38 +287,71 @@ private fun FloatingCaption(text: String, accent: Color, speakerName: String) {
 }
 
 /**
- * Dibuja un contorno redondeado alrededor de cada cara con el color de su
- * hablante (spec 6/8). La cara que esta hablando se resalta con trazo grueso y
- * opaco; las demas, con trazo fino y tenue. Las caras aun sin voz asociada usan
- * un gris neutro hasta que la fusion cara-voz aprende a quien pertenecen.
+ * Silueta-aura del que habla (spec 6/8). En vez de una caja, dibuja el contorno
+ * real del rostro (FACE_OVAL de ML Kit) como un halo del color del hablante:
+ * varias capas de trazo de grueso/transparente a fino/nitido, mas un relleno
+ * radial tenue, con un latido suave mientras habla. Solo se pinta la cara
+ * activa; las caras en reposo quedan limpias. Si no hubiera contorno, cae a un
+ * ovalo del tamano de la cara.
  */
 @Composable
-private fun FaceOutlines(
-    faces: List<DetectedFace>,
-    active: DetectedFace?,
+private fun FaceAura(
+    face: DetectedFace?,
+    color: Color?,
     modifier: Modifier = Modifier,
 ) {
+    if (face == null || color == null) return
+
+    // Latido suave: el aura "respira" mientras la persona habla.
+    val pulse = rememberInfiniteTransition(label = "aura")
+    val glow by pulse.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "auraGlow",
+    )
+
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
-        faces.forEach { face ->
-            val color = face.speaker?.let { speakerColor(it) } ?: VoxiSlate
-            val isActive = active != null && face.trackId >= 0 && active.trackId == face.trackId
+        val contour = face.contour
+
+        val path = Path()
+        if (contour != null && contour.size >= 6) {
+            path.moveTo(contour[0] * w, contour[1] * h)
+            var i = 2
+            while (i + 1 < contour.size) {
+                path.lineTo(contour[i] * w, contour[i + 1] * h)
+                i += 2
+            }
+            path.close()
+        } else {
+            // Respaldo: si ML Kit no entrega contorno, un ovalo de la cara.
             val boxW = (face.widthRatio * w).coerceAtLeast(8f)
-            val boxH = (face.heightRatio * h).coerceAtLeast(8f)
-            val padX = boxW * 0.12f
-            val padY = boxH * 0.16f
-            drawRoundRect(
-                color = color.copy(alpha = if (isActive) 1f else 0.5f),
-                topLeft = Offset(
-                    face.cx * w - boxW / 2f - padX,
-                    face.cy * h - boxH / 2f - padY,
-                ),
-                size = GeoSize(boxW + padX * 2f, boxH + padY * 2f),
-                cornerRadius = CornerRadius(boxW * 0.4f, boxW * 0.4f),
-                style = Stroke(width = (if (isActive) 5f else 2.5f).dp.toPx()),
-            )
+            val boxH = (face.heightRatio * h).coerceAtLeast(8f) * 1.18f
+            val left = face.cx * w - boxW / 2f
+            val top = face.cy * h - boxH / 2f
+            path.addOval(Rect(left, top, left + boxW, top + boxH))
         }
+
+        val cx = face.cx * w
+        val cy = face.cy * h
+        val radius = maxOf(face.widthRatio * w, face.heightRatio * h).coerceAtLeast(40f)
+
+        // Halo de relleno: degradado radial tenue dentro de la silueta.
+        drawPath(
+            path = path,
+            brush = Brush.radialGradient(
+                colors = listOf(color.copy(alpha = 0.22f * glow), Color.Transparent),
+                center = Offset(cx, cy),
+                radius = radius,
+            ),
+        )
+        // Capas de trazo: de grueso/transparente (resplandor) a fino/nitido.
+        drawPath(path, color = color.copy(alpha = 0.10f * glow), style = Stroke(width = 16.dp.toPx()))
+        drawPath(path, color = color.copy(alpha = 0.20f * glow), style = Stroke(width = 9.dp.toPx()))
+        drawPath(path, color = color.copy(alpha = 0.45f * glow), style = Stroke(width = 4.5f.dp.toPx()))
+        drawPath(path, color = color.copy(alpha = 0.95f), style = Stroke(width = 2.dp.toPx()))
     }
 }
 
@@ -357,6 +400,8 @@ private fun TopBar(
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            VoxiBadge(size = 22.dp)
+            Spacer(Modifier.width(8.dp))
             Box(
                 modifier = Modifier
                     .size(10.dp)

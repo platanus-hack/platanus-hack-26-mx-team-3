@@ -463,6 +463,20 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
         lastSpeaker = manual ?: (clusters.firstOrNull()?.let { Speaker(it.index) } ?: Speaker.First)
     }
 
+    /**
+     * Reset de sesión: una conversación nueva empieza con hablantes NUEVOS (no
+     * arrastra las voces de antes), pero NO borra el disco. La memoria de largo
+     * plazo sigue guardada, así que al reiniciar la app se vuelven a reconocer;
+     * las voces que se aprendan en esta sesión nueva se guardan con normalidad y
+     * reemplazan a las anteriores. "Empezar de cero" sin perder la persistencia.
+     */
+    fun sessionReset() {
+        clusters.clear()
+        nextIndex = 0
+        lastSpeaker = manual ?: Speaker.First
+        // A propósito NO llamamos store?.clear(): el disco conserva la memoria.
+    }
+
     /** Olvida por completo a todas las voces (también en disco). */
     fun forgetAll() {
         clusters.clear()

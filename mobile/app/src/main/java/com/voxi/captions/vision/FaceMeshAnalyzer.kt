@@ -70,8 +70,26 @@ class FaceMeshAnalyzer(
             heightRatio = (box.height().toFloat() / height).coerceIn(0f, 1f),
             mouthOpen = mouthOpen,
             signature = signatureOf(mesh),
+            contour = contourOf(mesh, width, height),
         )
     }
+
+    /**
+     * Contorno del óvalo del rostro (FACE_OVAL) normalizado a [0,1] como una
+     * secuencia [x0,y0,x1,y1,...] lista para dibujar la silueta/aura del que
+     * habla. Devuelve null si ML Kit no entrega el contorno.
+     */
+    private fun contourOf(mesh: FaceMesh, width: Float, height: Float): FloatArray? = runCatching {
+        val pts = mesh.getPoints(FaceMesh.FACE_OVAL)
+        if (pts.size < 3) return@runCatching null
+        val out = FloatArray(pts.size * 2)
+        var i = 0
+        for (pt in pts) {
+            out[i++] = (pt.position.x / width).coerceIn(0f, 1f)
+            out[i++] = (pt.position.y / height).coerceIn(0f, 1f)
+        }
+        out
+    }.getOrNull()
 
     /**
      * Firma geométrica del rostro: proporciones faciales normalizadas por la

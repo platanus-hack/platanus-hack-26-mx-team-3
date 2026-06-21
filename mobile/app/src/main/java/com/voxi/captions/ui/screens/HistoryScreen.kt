@@ -30,6 +30,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.voxi.captions.data.SessionMeta
 import com.voxi.captions.ui.components.ChatBubble
+import com.voxi.captions.ui.components.VoxiBadge
 import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
 import com.voxi.captions.ui.theme.VoxiBorder
@@ -66,6 +67,8 @@ fun HistoryScreen(
         Row(verticalAlignment = Alignment.CenterVertically) {
             BackChip(label = "Volver", onClick = { if (viewing != null) onBackToList() else onClose() })
             Spacer(Modifier.width(12.dp))
+            VoxiBadge(size = 24.dp)
+            Spacer(Modifier.width(8.dp))
             Text(
                 text = if (viewing != null) "Conversación" else "Historial",
                 style = MaterialTheme.typography.titleLarge,

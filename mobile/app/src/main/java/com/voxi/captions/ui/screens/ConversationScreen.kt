@@ -49,9 +49,8 @@ import com.voxi.captions.model.Utterance
 import com.voxi.captions.ui.components.ChatBubble
 import com.voxi.captions.ui.components.ComposeBar
 import com.voxi.captions.ui.components.SmartReplyChips
+import com.voxi.captions.ui.components.VoxiWordmark
 import com.voxi.captions.ui.theme.VoxiBackground
-import com.voxi.captions.ui.theme.VoxiBg
-import com.voxi.captions.ui.theme.VoxiBrandGradient
 import com.voxi.captions.ui.theme.VoxiSlate
 import com.voxi.captions.ui.theme.VoxiSurfaceHigh
 import com.voxi.captions.ui.theme.VoxiTeal
@@ -68,6 +67,7 @@ fun ConversationScreen(
     onExport: () -> Unit = {},
     onHistory: () -> Unit = {},
     onNewConversation: () -> Unit = {},
+    onChangeVoice: () -> Unit = {},
 ) {
     Column(
         modifier = modifier
@@ -88,6 +88,7 @@ fun ConversationScreen(
             onHistory = onHistory,
             onExport = onExport,
             onToggleCamera = onToggleCamera,
+            onChangeVoice = onChangeVoice,
         )
 
         Spacer(Modifier.size(12.dp))
@@ -132,25 +133,7 @@ fun ConversationScreen(
 @Composable
 private fun Header(isListening: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(VoxiBrandGradient),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "V",
-                style = MaterialTheme.typography.labelLarge,
-                color = VoxiBg,
-            )
-        }
-        Spacer(Modifier.width(10.dp))
-        Text(
-            text = "Voxi",
-            style = MaterialTheme.typography.titleLarge,
-            color = VoxiTeal,
-        )
+        VoxiWordmark(subtitle = "Subtitulos vivos")
         Spacer(Modifier.weight(1f))
         if (isListening) ListeningIndicator()
     }
@@ -164,6 +147,7 @@ private fun ActionsRow(
     onHistory: () -> Unit,
     onExport: () -> Unit,
     onToggleCamera: () -> Unit,
+    onChangeVoice: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -172,9 +156,10 @@ private fun ActionsRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         PillButton(label = "Nueva", onClick = onNewConversation)
+        PillButton(label = "Camara", onClick = onToggleCamera)
+        PillButton(label = "Voz", onClick = onChangeVoice)
         PillButton(label = "Historial", onClick = onHistory)
         if (canExport) PillButton(label = "Exportar", onClick = onExport)
-        PillButton(label = "Camara", onClick = onToggleCamera)
     }
 }
 

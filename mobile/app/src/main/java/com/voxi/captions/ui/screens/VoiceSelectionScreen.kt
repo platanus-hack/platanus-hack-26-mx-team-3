@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -23,9 +21,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.voxi.captions.model.VoiceType
+import com.voxi.captions.ui.components.VoxiBadge
 import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
-import com.voxi.captions.ui.theme.VoxiBrandGradient
 import com.voxi.captions.ui.theme.VoxiSlate
 import com.voxi.captions.ui.theme.VoxiSurfaceHigh
 import com.voxi.captions.ui.theme.VoxiTeal
@@ -39,6 +37,7 @@ import com.voxi.captions.ui.theme.VoxiTeal
 fun VoiceSelectionScreen(
     onSelect: (VoiceType) -> Unit,
     modifier: Modifier = Modifier,
+    onCancel: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -48,19 +47,7 @@ fun VoiceSelectionScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(64.dp)
-                .clip(CircleShape)
-                .background(VoxiBrandGradient),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "V",
-                style = MaterialTheme.typography.headlineSmall,
-                color = VoxiBg,
-            )
-        }
+        VoxiBadge(size = 64.dp)
         Spacer(Modifier.size(20.dp))
         Text(
             text = "Elige tu voz",
@@ -78,6 +65,18 @@ fun VoiceSelectionScreen(
         VoiceType.entries.forEach { type ->
             VoiceOption(type = type, onClick = { onSelect(type) })
             Spacer(Modifier.size(12.dp))
+        }
+        if (onCancel != null) {
+            Spacer(Modifier.size(4.dp))
+            Text(
+                text = "Mantener la voz actual",
+                style = MaterialTheme.typography.labelLarge,
+                color = VoxiSlate,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = onCancel)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
         }
     }
 }

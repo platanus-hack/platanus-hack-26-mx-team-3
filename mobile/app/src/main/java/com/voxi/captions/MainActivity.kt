@@ -10,13 +10,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -28,18 +26,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.voxi.captions.ui.components.VoxiBadge
 import com.voxi.captions.ui.screens.CameraScreen
 import com.voxi.captions.ui.screens.ConversationScreen
 import com.voxi.captions.ui.screens.HistoryScreen
 import com.voxi.captions.ui.screens.VoiceSelectionScreen
 import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
-import com.voxi.captions.ui.theme.VoxiBrandGradient
 import com.voxi.captions.ui.theme.VoxiSlate
 import com.voxi.captions.ui.theme.VoxiTheme
 import com.voxi.captions.viewmodel.ConversationViewModel
@@ -113,6 +110,7 @@ private fun VoxiApp() {
         state.needsVoiceSelection -> VoiceSelectionScreen(
             onSelect = viewModel::setVoiceType,
             modifier = Modifier.fillMaxSize(),
+            onCancel = viewModel::cancelVoiceChange,
         )
         !hasMicPermission -> PermissionRequest(
             onRequest = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
@@ -141,6 +139,7 @@ private fun VoxiApp() {
             onExport = { viewModel.exportConversation(context) },
             onHistory = viewModel::openHistory,
             onNewConversation = viewModel::startNewConversation,
+            onChangeVoice = viewModel::requestVoiceChange,
         )
     }
 }
@@ -155,19 +154,7 @@ private fun PermissionRequest(onRequest: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(72.dp)
-                .clip(CircleShape)
-                .background(VoxiBrandGradient),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "V",
-                style = MaterialTheme.typography.headlineSmall,
-                color = VoxiBg,
-            )
-        }
+        VoxiBadge(size = 72.dp)
         Spacer(Modifier.size(20.dp))
         Text(
             text = "Voxi",

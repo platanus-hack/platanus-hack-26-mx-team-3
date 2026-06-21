@@ -264,6 +264,22 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update { it.copy(voiceType = type, needsVoiceSelection = false) }
     }
 
+    /**
+     * Reabre el selector de voz a mitad de sesion (spec 7): el usuario puede
+     * re-personalizar la voz del TTS cuando quiera. Reusa la misma pantalla que
+     * la primera vez; al elegir, [setVoiceType] la cierra.
+     */
+    fun requestVoiceChange() {
+        _uiState.update { it.copy(needsVoiceSelection = true) }
+    }
+
+    /** Cierra el selector de voz sin cambiar nada (mantiene la voz actual). */
+    fun cancelVoiceChange() {
+        // Marca que ya hubo una eleccion para no volver a mostrarlo solo.
+        settings.voiceChosen = true
+        _uiState.update { it.copy(needsVoiceSelection = false) }
+    }
+
     /** Exporta la conversación a un .txt en Descargas (spec §7 extra). */
     fun exportConversation(context: Context) {
         val utterances = _uiState.value.utterances
@@ -282,8 +298,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         saveNow()
         nextId = 0
         sessionId = System.currentTimeMillis()
-        // Reset suave: conserva las voces aprendidas (memoria tipo Alexa).
-        speakers.softReset()
+        // Conversacion nueva = hablantes nuevos: olvida las voces de la sesion en
+        // memoria, pero conserva la memoria de largo plazo en disco (spec 6).
+        speakers.sessionReset()
         prosody.reset()
         resetPcm()
         // Las asociaciones cara-voz son por sesion: una conversacion nueva las olvida.
