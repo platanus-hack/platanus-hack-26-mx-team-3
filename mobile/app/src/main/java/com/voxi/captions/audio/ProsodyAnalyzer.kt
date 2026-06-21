@@ -1,6 +1,7 @@
 package com.voxi.captions.audio
 
 import com.voxi.captions.model.Tone
+import com.voxi.captions.model.VoiceProfile
 import kotlin.math.log10
 import kotlin.math.sqrt
 
@@ -8,6 +9,9 @@ import kotlin.math.sqrt
  * Analiza la prosodia del audio crudo (spec §5): volumen (RMS), pitch
  * (autocorrelación) y ritmo (onsets por segundo). Suaviza con EMA y entrega
  * un [Tone] con valores normalizados a 0..1.
+ *
+ * Además, al cerrar cada intervención calcula un [VoiceProfile] (huella de voz)
+ * con la mediana y la dispersión del pitch, que alimenta la diarización.
  *
  * Se alimenta desde el mismo loop de IO que reparte buffers a Vosk (spec §2);
  * el coste por buffer es bajo y no toca el hilo principal.
@@ -34,6 +38,8 @@ class ProsodyAnalyzer {
         private const val VOICED_THRESHOLD = 0.3f
         // Ventana para contar onsets recientes
         private const val RHYTHM_WINDOW_MS = 2_000L
+        // Mínimo de tramas con voz para confiar en la huella de voz.
+        private const val MIN_VOICED_FRAMES = 5
     }
 
     // EMA en vivo (para el parcial)
@@ -51,6 +57,10 @@ class ProsodyAnalyzer {
     private var uttVolumeCount = 0
     private var uttEmphasis = false
     private val pitchTrack = ArrayList<Float>()
+    private val brightnessTrack = ArrayList<Float>()
+
+    // Huella de voz de la última intervención cerrada.
+    private var lastProfile = VoiceProfile.Unknown
 
     /** Reinicio total (watchdog del spec §4). */
     fun reset() {
@@ -60,6 +70,7 @@ class ProsodyAnalyzer {
         prevVolume = 0f
         aboveOnset = false
         onsetTimestamps.clear()
+        lastProfile = VoiceProfile.Unknown
         resetUtterance()
     }
 
@@ -68,6 +79,7 @@ class ProsodyAnalyzer {
         uttVolumeCount = 0
         uttEmphasis = false
         pitchTrack.clear()
+        brightnessTrack.clear()
     }
 
     /** Procesa un buffer PCM16 y actualiza el tono en vivo. */
@@ -102,6 +114,7 @@ class ProsodyAnalyzer {
                 ((pitchHz - PITCH_MIN_HZ) / (PITCH_MAX_HZ - PITCH_MIN_HZ)).coerceIn(0f, 1f)
             emaPitch = ema(emaPitch, pitchNorm)
             pitchTrack.add(pitchNorm)
+            brightnessTrack.add(spectralBrightness(buffer, length))
         }
 
         uttVolumeSum += volume
@@ -122,6 +135,7 @@ class ProsodyAnalyzer {
     fun finishUtterance(): Tone {
         val avgVolume = if (uttVolumeCount > 0) uttVolumeSum / uttVolumeCount else emaVolume
         val avgPitch = if (pitchTrack.isNotEmpty()) pitchTrack.average().toFloat() else emaPitch
+        lastProfile = buildProfile(avgVolume)
         val tone = Tone(
             volume = avgVolume,
             pitch = avgPitch,
@@ -131,6 +145,61 @@ class ProsodyAnalyzer {
         )
         resetUtterance()
         return tone
+    }
+
+    /** Huella de voz de la última intervención cerrada (para diarización). */
+    fun lastVoiceProfile(): VoiceProfile = lastProfile
+
+    /**
+     * Construye el vector de características de la voz a partir del recorrido de
+     * pitch: mediana (robusta) y dispersión (IQR normalizado).
+     */
+    private fun buildProfile(avgVolume: Float): VoiceProfile {
+        val voiced = pitchTrack.size >= MIN_VOICED_FRAMES
+        if (!voiced) return VoiceProfile(emaPitch, 0f, 0.5f, avgVolume, voiced = false)
+        val sorted = pitchTrack.sorted()
+        val median = percentile(sorted, 0.5f)
+        val q1 = percentile(sorted, 0.25f)
+        val q3 = percentile(sorted, 0.75f)
+        val spread = (q3 - q1).coerceIn(0f, 1f)
+        val brightness = if (brightnessTrack.isNotEmpty())
+            percentile(brightnessTrack.sorted(), 0.5f) else 0.5f
+        return VoiceProfile(
+            medianPitch = median,
+            pitchSpread = spread,
+            brightness = brightness,
+            meanVolume = avgVolume,
+            voiced = true,
+        )
+    }
+
+    /**
+     * Brillo/timbre: razón entre la energía de la señal derivada (altas
+     * frecuencias) y la señal original. Proxy barato del centroide espectral,
+     * sin FFT, que ayuda a separar voces con pitch parecido pero timbre distinto.
+     */
+    private fun spectralBrightness(buffer: ShortArray, length: Int): Float {
+        if (length < 2) return 0.5f
+        var e = 0.0
+        var d = 0.0
+        for (i in 1 until length) {
+            val s = buffer[i].toDouble()
+            e += s * s
+            val df = (buffer[i].toInt() - buffer[i - 1].toInt()).toDouble()
+            d += df * df
+        }
+        if (e < 1.0) return 0.5f
+        // d/e va de ~0 (grave) a ~4 (agudo, cerca de Nyquist). Normaliza a 0..1.
+        return (d / (4.0 * e)).toFloat().coerceIn(0f, 1f)
+    }
+
+    private fun percentile(sorted: List<Float>, p: Float): Float {
+        if (sorted.isEmpty()) return 0f
+        val idx = (p * (sorted.size - 1)).coerceIn(0f, (sorted.size - 1).toFloat())
+        val lo = idx.toInt()
+        val hi = (lo + 1).coerceAtMost(sorted.size - 1)
+        val frac = idx - lo
+        return sorted[lo] * (1f - frac) + sorted[hi] * frac
     }
 
     /** Detecta si el pitch del último tercio sube respecto al primero (pregunta). */

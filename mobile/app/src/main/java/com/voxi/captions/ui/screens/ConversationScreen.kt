@@ -8,6 +8,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,8 +23,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
@@ -41,10 +43,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.voxi.captions.model.Origin
 import com.voxi.captions.model.Speaker
 import com.voxi.captions.model.Utterance
+import com.voxi.captions.ui.components.ChatBubble
 import com.voxi.captions.ui.components.ComposeBar
-import com.voxi.captions.ui.components.SpeechBubble
 import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
 import com.voxi.captions.ui.theme.VoxiBrandGradient
@@ -62,6 +65,8 @@ fun ConversationScreen(
     onSend: (String) -> Unit = {},
     onToggleCamera: () -> Unit = {},
     onExport: () -> Unit = {},
+    onHistory: () -> Unit = {},
+    onNewConversation: () -> Unit = {},
 ) {
     Column(
         modifier = modifier
@@ -72,9 +77,14 @@ fun ConversationScreen(
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        Header(
-            isListening = state.isListening,
+        Header(isListening = state.isListening)
+
+        Spacer(Modifier.size(12.dp))
+
+        ActionsRow(
             canExport = state.utterances.isNotEmpty(),
+            onNewConversation = onNewConversation,
+            onHistory = onHistory,
             onExport = onExport,
             onToggleCamera = onToggleCamera,
         )
@@ -83,6 +93,7 @@ fun ConversationScreen(
 
         SpeakerSelector(
             manualSpeaker = state.manualSpeaker,
+            speakers = state.knownSpeakers,
             onSelect = onSelectSpeaker,
         )
 
@@ -113,12 +124,7 @@ fun ConversationScreen(
 }
 
 @Composable
-private fun Header(
-    isListening: Boolean,
-    canExport: Boolean,
-    onExport: () -> Unit,
-    onToggleCamera: () -> Unit,
-) {
+private fun Header(isListening: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
@@ -140,14 +146,28 @@ private fun Header(
             color = VoxiTeal,
         )
         Spacer(Modifier.weight(1f))
-        if (isListening) {
-            ListeningIndicator()
-            Spacer(Modifier.width(12.dp))
-        }
-        if (canExport) {
-            PillButton(label = "Exportar", onClick = onExport)
-            Spacer(Modifier.width(8.dp))
-        }
+        if (isListening) ListeningIndicator()
+    }
+}
+
+/** Acciones del chat en una fila desplazable para que nunca se desborde. */
+@Composable
+private fun ActionsRow(
+    canExport: Boolean,
+    onNewConversation: () -> Unit,
+    onHistory: () -> Unit,
+    onExport: () -> Unit,
+    onToggleCamera: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PillButton(label = "Nueva", onClick = onNewConversation)
+        PillButton(label = "Historial", onClick = onHistory)
+        if (canExport) PillButton(label = "Exportar", onClick = onExport)
         PillButton(label = "Camara", onClick = onToggleCamera)
     }
 }
@@ -169,19 +189,29 @@ private fun PillButton(label: String, onClick: () -> Unit) {
     )
 }
 
-/** Selector de carril (spec §6, Modo A): Auto = diarización por pitch. */
+/**
+ * Selector de hablante (spec §6, Modo A): "Auto" usa la diarización por huella
+ * de voz; los demás chips fijan manualmente a una de las voces ya descubiertas.
+ * La fila es desplazable porque pueden aparecer hasta 8 hablantes.
+ */
 @Composable
 private fun SpeakerSelector(
     manualSpeaker: Speaker?,
+    speakers: List<Speaker>,
     onSelect: (Speaker?) -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         FilterChip(
             selected = manualSpeaker == null,
             onClick = { onSelect(null) },
             label = { Text("Auto") },
         )
-        Speaker.entries.forEach { speaker ->
+        speakers.forEach { speaker ->
             val color = speakerColor(speaker)
             FilterChip(
                 selected = manualSpeaker == speaker,
@@ -237,47 +267,32 @@ private fun Conversation(state: ConversationUiState) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(state.utterances, key = Utterance::id) { utterance ->
-            SpeakerRow(speaker = utterance.speaker, modifier = Modifier.animateItem()) {
-                SpeechBubble(
-                    text = utterance.text,
-                    tone = utterance.tone,
-                    speakerName = utterance.speaker.displayName,
-                    speakerColor = speakerColor(utterance.speaker),
-                    alignEnd = utterance.speaker == Speaker.TWO,
-                )
-            }
+        itemsIndexed(state.utterances, key = { _, u -> u.id }) { index, utterance ->
+            ChatBubble(
+                utterance = utterance,
+                previous = state.utterances.getOrNull(index - 1),
+                modifier = Modifier.animateItem(),
+            )
         }
         if (state.partialText.isNotEmpty()) {
             item(key = "partial") {
-                SpeakerRow(speaker = state.partialSpeaker, modifier = Modifier.animateItem()) {
-                    SpeechBubble(
-                        text = state.partialText,
-                        tone = state.partialTone,
-                        isPartial = true,
-                        speakerName = state.partialSpeaker.displayName,
-                        speakerColor = speakerColor(state.partialSpeaker),
-                        alignEnd = state.partialSpeaker == Speaker.TWO,
-                    )
-                }
+                val partial = Utterance(
+                    id = -1L,
+                    text = state.partialText,
+                    tone = state.partialTone,
+                    speaker = state.partialSpeaker,
+                    origin = Origin.HEARD,
+                )
+                ChatBubble(
+                    utterance = partial,
+                    previous = state.utterances.lastOrNull(),
+                    isPartial = true,
+                    modifier = Modifier.animateItem(),
+                )
             }
         }
-    }
-}
-
-/** Coloca la burbuja en el carril del hablante: Hablante 1 a la izquierda, 2 a la derecha. */
-@Composable
-private fun SpeakerRow(
-    speaker: Speaker,
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
-) {
-    Row(modifier = modifier.fillMaxWidth()) {
-        if (speaker == Speaker.TWO) Spacer(Modifier.weight(1f))
-        Box(modifier = Modifier.weight(5f, fill = false)) { content() }
-        if (speaker == Speaker.ONE) Spacer(Modifier.weight(1f))
     }
 }
 

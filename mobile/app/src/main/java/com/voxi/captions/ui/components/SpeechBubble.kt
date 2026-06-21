@@ -53,6 +53,7 @@ fun SpeechBubble(
     speakerName: String? = null,
     speakerColor: Color = VoxiTeal,
     alignEnd: Boolean = false,
+    showSpeaker: Boolean = true,
 ) {
     val style = toneStyle(tone)
 
@@ -90,12 +91,18 @@ fun SpeechBubble(
         text
     }
 
+    // Cuando la frase es del mismo hablante que la anterior, ocultamos el avatar
+    // pero reservamos su ancho para que el grupo quede alineado.
     val avatar: @Composable () -> Unit = {
-        SpeakerAvatar(
-            label = speakerName ?: "?",
-            color = speakerColor,
-            dimmed = isPartial,
-        )
+        if (showSpeaker) {
+            SpeakerAvatar(
+                label = speakerName ?: "?",
+                color = speakerColor,
+                dimmed = isPartial,
+            )
+        } else {
+            Spacer(Modifier.size(34.dp))
+        }
     }
 
     Row(
@@ -125,7 +132,7 @@ fun SpeechBubble(
             .padding(horizontal = 16.dp, vertical = 11.dp)
 
         Column(modifier = bubbleModifier) {
-            if (speakerName != null) {
+            if (showSpeaker && speakerName != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = speakerName,
