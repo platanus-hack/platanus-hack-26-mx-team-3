@@ -133,6 +133,7 @@ private fun Conversation(state: ConversationUiState) {
         items(state.utterances, key = Utterance::id) { utterance ->
             SpeechBubble(
                 text = utterance.text,
+                tone = utterance.tone,
                 modifier = Modifier.animateItem(),
             )
         }
@@ -140,6 +141,7 @@ private fun Conversation(state: ConversationUiState) {
             item(key = "partial") {
                 SpeechBubble(
                     text = state.partialText,
+                    tone = state.partialTone,
                     isPartial = true,
                     modifier = Modifier.animateItem(),
                 )

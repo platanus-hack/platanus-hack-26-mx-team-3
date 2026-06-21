@@ -4,7 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.voxi.captions.audio.AudioCapture
+import com.voxi.captions.audio.ProsodyAnalyzer
 import com.voxi.captions.audio.VoskEngine
+import com.voxi.captions.model.Tone
 import com.voxi.captions.model.Utterance
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +23,7 @@ data class ConversationUiState(
     val isModelLoading: Boolean = true,
     val isListening: Boolean = false,
     val partialText: String = "",
+    val partialTone: Tone = Tone.Neutral,
     val utterances: List<Utterance> = emptyList(),
     val statusMessage: String? = null,
 )
@@ -29,6 +32,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private val vosk = VoskEngine()
     private val audio = AudioCapture()
+    private val prosody = ProsodyAnalyzer()
 
     private val _uiState = MutableStateFlow(ConversationUiState())
     val uiState: StateFlow<ConversationUiState> = _uiState.asStateFlow()
@@ -65,14 +69,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 audio.frames().collect { buffer ->
                     if (!vosk.isReady) return@collect
+                    // Un mismo buffer alimenta a Vosk y al análisis de tono (spec §2).
+                    prosody.feed(buffer, buffer.size)
                     when (val r = vosk.accept(buffer, buffer.size)) {
                         is VoskEngine.Recognition.Partial -> {
                             lastProgressMs = System.currentTimeMillis()
-                            _uiState.update { it.copy(partialText = r.text) }
+                            _uiState.update { it.copy(partialText = r.text, partialTone = prosody.current()) }
                         }
                         is VoskEngine.Recognition.Final -> {
                             lastProgressMs = System.currentTimeMillis()
-                            addUtterance(r.text)
+                            addUtterance(r.text, prosody.finishUtterance())
                         }
                         VoskEngine.Recognition.None -> Unit
                     }
@@ -89,14 +95,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         captureJob?.cancel()
         captureJob = null
         val pending = vosk.flush()
-        if (pending is VoskEngine.Recognition.Final) addUtterance(pending.text)
+        if (pending is VoskEngine.Recognition.Final) addUtterance(pending.text, prosody.finishUtterance())
         _uiState.update { it.copy(isListening = false, partialText = "") }
     }
 
-    private fun addUtterance(text: String) {
+    private fun addUtterance(text: String, tone: Tone) {
         _uiState.update { state ->
             state.copy(
-                utterances = state.utterances + Utterance(id = nextId++, text = text),
+                utterances = state.utterances + Utterance(id = nextId++, text = text, tone = tone),
                 partialText = "",
             )
         }
@@ -107,7 +113,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             delay(2_000)
             val idleMs = System.currentTimeMillis() - lastProgressMs
             if (_uiState.value.isListening && idleMs > 8_000) {
-                withContext(Dispatchers.IO) { vosk.reset() }
+                withContext(Dispatchers.IO) {
+                    vosk.reset()
+                    prosody.reset()
+                }
                 lastProgressMs = System.currentTimeMillis()
                 _uiState.update { it.copy(statusMessage = "Reanudando…") }
             }
