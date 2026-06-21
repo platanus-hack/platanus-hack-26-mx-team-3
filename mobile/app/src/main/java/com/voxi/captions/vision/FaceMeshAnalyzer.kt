@@ -71,6 +71,7 @@ class FaceMeshAnalyzer(
             mouthOpen = mouthOpen,
             signature = signatureOf(mesh),
             contour = contourOf(mesh, width, height),
+            imageAspect = width / height,
         )
     }
 

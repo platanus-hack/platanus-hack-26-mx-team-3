@@ -4,6 +4,7 @@ import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -98,9 +99,16 @@ fun CameraScreen(
         providerFuture.addListener({
             runCatching {
                 val provider = providerFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = previewView.surfaceProvider
-                }
+                // Preview y analisis comparten aspecto 4:3 para que las
+                // coordenadas de las caras coincidan con lo que se ve en pantalla
+                // tras el recorte FILL_CENTER (spec §6).
+                val previewSelector = ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                    .build()
+                val preview = Preview.Builder()
+                    .setResolutionSelector(previewSelector)
+                    .build()
+                    .also { it.surfaceProvider = previewView.surfaceProvider }
                 val resolution = ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
@@ -180,14 +188,35 @@ private fun CaptionOverlay(
     val active = state.activeFace
 
     BoxWithConstraints(modifier = modifier) {
+        val viewW = constraints.maxWidth.toFloat()
+        val viewH = constraints.maxHeight.toFloat()
+        val aspect = state.cameraAspect
+
         // Aura/silueta (spec 6/8): UNICAMENTE la cara que esta hablando se ilumina,
         // como un halo del color de su hablante. Las caras en reposo no llevan
         // ningun marco, para no saturar el encuadre.
         FaceAura(
             face = active,
             color = active?.let { speakerColor(it.speaker ?: state.partialSpeaker) },
+            aspect = aspect,
             modifier = Modifier.fillMaxSize(),
         )
+
+        // Modo C (spec §6): hay voz en curso pero NINGUNA cara visible esta
+        // hablando -> alguien fuera de cuadro. Se evalua ANTES que el texto
+        // anclado viejo; si no, tras la primera frase el aviso no volveria a
+        // salir (este era el bug: el parcial se pegaba al ancla anterior).
+        if (partial.isNotBlank() && active == null) {
+            val dir = state.soundDirection
+            val align = when {
+                dir == null -> Alignment.TopCenter
+                dir < -0.2f -> Alignment.TopStart
+                dir > 0.2f -> Alignment.TopEnd
+                else -> Alignment.TopCenter
+            }
+            OffscreenBanner(text = partial, direction = dir, modifier = Modifier.align(align))
+            return@BoxWithConstraints
+        }
 
         val text: String
         val cx: Float
@@ -200,45 +229,23 @@ private fun CaptionOverlay(
                 text = partial; cx = active.cx; cy = active.cy; faceW = active.widthRatio
                 accent = speakerColor(state.partialSpeaker); name = state.partialSpeaker.displayName
             }
-            partial.isNotBlank() && anchored != null -> {
-                text = partial; cx = anchored.cx; cy = anchored.cy; faceW = anchored.faceWidth
-                accent = speakerColor(state.partialSpeaker); name = state.partialSpeaker.displayName
-            }
             anchored != null -> {
                 text = anchored.text; cx = anchored.cx; cy = anchored.cy; faceW = anchored.faceWidth
                 accent = speakerColor(anchored.speaker); name = anchored.speaker.displayName
             }
-            else -> {
-                // Hay audio pero nadie en cuadro mueve la boca: alguien habla
-                // fuera de cuadro. Modo C (spec §6): si el microfono es estereo,
-                // el paneo L/R ubica el aviso del lado correcto; si no hay
-                // direccion (mono), cae al centro de forma honesta.
-                if (partial.isNotBlank()) {
-                    val dir = state.soundDirection
-                    val align = when {
-                        dir == null -> Alignment.TopCenter
-                        dir < -0.2f -> Alignment.TopStart
-                        dir > 0.2f -> Alignment.TopEnd
-                        else -> Alignment.TopCenter
-                    }
-                    OffscreenBanner(
-                        text = partial,
-                        direction = dir,
-                        modifier = Modifier.align(align),
-                    )
-                }
-                return@BoxWithConstraints
-            }
+            else -> return@BoxWithConstraints
         }
 
-        // Ancla la burbuja POR ENCIMA de la cabeza para no tapar la cara.
-        val (ax, ay) = anchorAboveHead(cx, cy, faceW)
+        // Ancla la burbuja POR ENCIMA de la cabeza, mapeando la posicion
+        // normalizada de la cara al recorte FILL_CENTER que muestra el preview.
+        val (nx, ny) = anchorAboveHead(cx, cy, faceW)
+        val anchor = mapFill(nx, ny, viewW, viewH, aspect)
         val bias by animateFloatAsState(
-            targetValue = (ax * 2f - 1f).coerceIn(-1f, 1f),
+            targetValue = (anchor.x / viewW * 2f - 1f).coerceIn(-1f, 1f),
             animationSpec = tween(250),
             label = "captionBias",
         )
-        val verticalBias = (ay * 2f - 1f).coerceIn(-0.96f, 0.96f)
+        val verticalBias = (anchor.y / viewH * 2f - 1f).coerceIn(-0.96f, 0.96f)
 
         Box(
             modifier = Modifier
@@ -287,17 +294,37 @@ private fun FloatingCaption(text: String, accent: Color, speakerName: String) {
 }
 
 /**
+ * Mapea una coordenada normalizada (0..1) de la imagen de la camara a pixeles
+ * de la vista aplicando el MISMO recorte FILL_CENTER que usa el PreviewView. Sin
+ * esto las coordenadas se estiran (FIT_XY) y el aura sale pequena y desplazada.
+ * [srcAspect] = ancho/alto de la imagen vertical de la camara.
+ */
+private fun mapFill(nx: Float, ny: Float, viewW: Float, viewH: Float, srcAspect: Float): Offset {
+    val sa = if (srcAspect <= 0f) viewW / viewH else srcAspect
+    // Imagen de referencia srcW = sa, srcH = 1. FILL_CENTER cubre toda la vista.
+    val scale = maxOf(viewW / sa, viewH)
+    val dispW = sa * scale
+    val dispH = scale
+    val offX = (viewW - dispW) / 2f
+    val offY = (viewH - dispH) / 2f
+    return Offset(offX + nx * dispW, offY + ny * dispH)
+}
+
+/**
  * Silueta-aura del que habla (spec 6/8). En vez de una caja, dibuja el contorno
  * real del rostro (FACE_OVAL de ML Kit) como un halo del color del hablante:
  * varias capas de trazo de grueso/transparente a fino/nitido, mas un relleno
- * radial tenue, con un latido suave mientras habla. Solo se pinta la cara
- * activa; las caras en reposo quedan limpias. Si no hubiera contorno, cae a un
- * ovalo del tamano de la cara.
+ * radial tenue, con un latido suave mientras habla. Las coordenadas se mapean
+ * con FILL_CENTER (igual que el preview) y la silueta se agranda un poco desde
+ * su centro para que el halo quede claro y por fuera de la cara. Solo se pinta
+ * la cara activa; las caras en reposo quedan limpias. Si no hubiera contorno,
+ * cae a un ovalo del tamano de la cara.
  */
 @Composable
 private fun FaceAura(
     face: DetectedFace?,
     color: Color?,
+    aspect: Float,
     modifier: Modifier = Modifier,
 ) {
     if (face == null || color == null) return
@@ -314,44 +341,64 @@ private fun FaceAura(
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
+        val sa = if (aspect <= 0f) w / h else aspect
+        val scale = maxOf(w / sa, h)
+        val dispW = sa * scale
+        val dispH = scale
+
+        val center = mapFill(face.cx, face.cy, w, h, aspect)
         val contour = face.contour
 
+        // Agranda la silueta ~1.18x desde su centro para un halo mas claro.
+        val grow = 1.18f
         val path = Path()
         if (contour != null && contour.size >= 6) {
-            path.moveTo(contour[0] * w, contour[1] * h)
-            var i = 2
+            var i = 0
+            var first = true
             while (i + 1 < contour.size) {
-                path.lineTo(contour[i] * w, contour[i + 1] * h)
+                val p = mapFill(contour[i], contour[i + 1], w, h, aspect)
+                val gx = center.x + (p.x - center.x) * grow
+                val gy = center.y + (p.y - center.y) * grow
+                if (first) {
+                    path.moveTo(gx, gy)
+                    first = false
+                } else {
+                    path.lineTo(gx, gy)
+                }
                 i += 2
             }
             path.close()
         } else {
             // Respaldo: si ML Kit no entrega contorno, un ovalo de la cara.
-            val boxW = (face.widthRatio * w).coerceAtLeast(8f)
-            val boxH = (face.heightRatio * h).coerceAtLeast(8f) * 1.18f
-            val left = face.cx * w - boxW / 2f
-            val top = face.cy * h - boxH / 2f
-            path.addOval(Rect(left, top, left + boxW, top + boxH))
+            val boxW = (face.widthRatio * dispW).coerceAtLeast(8f) * grow
+            val boxH = (face.heightRatio * dispH).coerceAtLeast(8f) * 1.32f
+            path.addOval(
+                Rect(
+                    center.x - boxW / 2f,
+                    center.y - boxH / 2f,
+                    center.x + boxW / 2f,
+                    center.y + boxH / 2f,
+                ),
+            )
         }
 
-        val cx = face.cx * w
-        val cy = face.cy * h
-        val radius = maxOf(face.widthRatio * w, face.heightRatio * h).coerceAtLeast(40f)
+        val radius = maxOf(face.widthRatio * dispW, face.heightRatio * dispH)
+            .coerceAtLeast(60f) * 0.9f
 
         // Halo de relleno: degradado radial tenue dentro de la silueta.
         drawPath(
             path = path,
             brush = Brush.radialGradient(
-                colors = listOf(color.copy(alpha = 0.22f * glow), Color.Transparent),
-                center = Offset(cx, cy),
+                colors = listOf(color.copy(alpha = 0.24f * glow), Color.Transparent),
+                center = center,
                 radius = radius,
             ),
         )
         // Capas de trazo: de grueso/transparente (resplandor) a fino/nitido.
-        drawPath(path, color = color.copy(alpha = 0.10f * glow), style = Stroke(width = 16.dp.toPx()))
-        drawPath(path, color = color.copy(alpha = 0.20f * glow), style = Stroke(width = 9.dp.toPx()))
-        drawPath(path, color = color.copy(alpha = 0.45f * glow), style = Stroke(width = 4.5f.dp.toPx()))
-        drawPath(path, color = color.copy(alpha = 0.95f), style = Stroke(width = 2.dp.toPx()))
+        drawPath(path, color = color.copy(alpha = 0.12f * glow), style = Stroke(width = 22.dp.toPx()))
+        drawPath(path, color = color.copy(alpha = 0.22f * glow), style = Stroke(width = 12.dp.toPx()))
+        drawPath(path, color = color.copy(alpha = 0.50f * glow), style = Stroke(width = 6.dp.toPx()))
+        drawPath(path, color = color.copy(alpha = 0.95f), style = Stroke(width = 2.5f.dp.toPx()))
     }
 }
 

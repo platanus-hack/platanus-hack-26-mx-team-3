@@ -29,6 +29,9 @@ data class DetectedFace(
     val trackId: Int = -1,
     val speaker: Speaker? = null,
     val contour: FloatArray? = null,
+    // Aspecto (ancho/alto) de la imagen vertical de la que salio esta cara, para
+    // mapear las coordenadas normalizadas al recorte FILL_CENTER del preview.
+    val imageAspect: Float = 0f,
 ) {
     // equals/hashCode ignoran la firma (FloatArray) para no comparar arreglos por
     // referencia; basta la geometría y los ids para detectar cambios de cuadro.

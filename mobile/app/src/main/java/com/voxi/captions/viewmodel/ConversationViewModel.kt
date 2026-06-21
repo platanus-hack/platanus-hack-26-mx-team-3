@@ -57,6 +57,9 @@ data class ConversationUiState(
     val faces: List<DetectedFace> = emptyList(),
     val activeFace: DetectedFace? = null,
     val anchoredCaption: AnchoredCaption? = null,
+    // Aspecto (ancho/alto) de la imagen de la camara en vertical, para mapear
+    // las coordenadas de las caras al recorte FILL_CENTER del preview (spec §6).
+    val cameraAspect: Float = 0.75f,
     // Modo C (spec §6): direccion estimada del sonido (-1 izq .. +1 der) o null.
     val soundDirection: Float? = null,
     // Voz del TTS elegida al inicio (spec §7).
@@ -105,6 +108,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private var captureJob: Job? = null
     private var saveJob: Job? = null
     private var replyJob: Job? = null
+    // Ultimo contexto por el que ya pedimos sugerencias (dedup de cuota Gemini).
+    private var lastSuggestKey: String? = null
 
     // Id de la sesión actual (timestamp de inicio) para el guardado automático.
     private var sessionId = System.currentTimeMillis()
@@ -381,7 +386,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         val audioActive = s.isListening &&
             (s.partialText.isNotBlank() || s.partialTone.volume > 0.35f)
         val active = activeSpeaker.update(tracked, audioActive)
-        _uiState.update { it.copy(faces = tracked, activeFace = active) }
+        val aspect = tracked.firstOrNull()?.imageAspect?.takeIf { it > 0f } ?: s.cameraAspect
+        _uiState.update { it.copy(faces = tracked, activeFace = active, cameraAspect = aspect) }
     }
 
     /** Modo A (spec §6): el usuario fija un carril, o null para diarización automática. */
@@ -442,14 +448,25 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             .takeLast(6)
             .map { it.text }
         if (heard.isEmpty()) {
+            lastSuggestKey = null
             _uiState.update { it.copy(suggestedReplies = emptyList()) }
             return
         }
+        // Mismo contexto que la ultima vez: no regastamos cuota de Gemini.
+        val key = heard.joinToString("|")
+        if (key == lastSuggestKey) return
+        lastSuggestKey = key
+
         replyJob?.cancel()
         replyJob = viewModelScope.launch {
+            // Respaldo offline al instante (saludo/pregunta/agradecimiento...).
+            _uiState.update { it.copy(suggestedReplies = OfflineReplies.forContext(heard)) }
+            // Debounce: deja que se acumulen frases muy seguidas antes de llamar.
+            delay(700)
             val replies = SmartReplyService.suggest(heard)
-            val final = replies.ifEmpty { OfflineReplies.defaults }
-            _uiState.update { it.copy(suggestedReplies = final) }
+            if (replies.isNotEmpty()) {
+                _uiState.update { it.copy(suggestedReplies = replies) }
+            }
         }
     }
 
