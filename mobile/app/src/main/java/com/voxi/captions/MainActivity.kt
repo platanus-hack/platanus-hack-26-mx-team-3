@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.voxi.captions.ui.screens.CameraScreen
 import com.voxi.captions.ui.screens.ConversationScreen
+import com.voxi.captions.ui.screens.HistoryScreen
 import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
 import com.voxi.captions.ui.theme.VoxiBrandGradient
@@ -111,6 +112,14 @@ private fun VoxiApp() {
         !hasMicPermission -> PermissionRequest(
             onRequest = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
         )
+        state.showHistory -> HistoryScreen(
+            state = state,
+            onClose = viewModel::closeHistory,
+            onOpenSession = viewModel::openSession,
+            onBackToList = viewModel::backToHistoryList,
+            onDeleteSession = viewModel::deleteSession,
+            modifier = Modifier.fillMaxSize(),
+        )
         state.showCamera && hasCameraPermission -> CameraScreen(
             state = state,
             onFacesDetected = viewModel::onFacesDetected,
@@ -124,6 +133,8 @@ private fun VoxiApp() {
             onSend = viewModel::speak,
             onToggleCamera = onToggleCamera,
             onExport = { viewModel.exportConversation(context) },
+            onHistory = viewModel::openHistory,
+            onNewConversation = viewModel::startNewConversation,
         )
     }
 }

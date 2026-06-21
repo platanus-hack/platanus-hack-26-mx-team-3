@@ -51,6 +51,7 @@ import com.voxi.captions.ui.theme.VoxiMint
 import com.voxi.captions.ui.theme.VoxiSlate
 import com.voxi.captions.ui.theme.VoxiSurface
 import com.voxi.captions.ui.theme.VoxiTeal
+import com.voxi.captions.ui.theme.speakerColor
 import com.voxi.captions.vision.DetectedFace
 import com.voxi.captions.vision.FaceMeshAnalyzer
 import com.voxi.captions.viewmodel.ConversationUiState
@@ -132,25 +133,79 @@ fun CameraScreen(
     }
 }
 
-/** Subtítulo anclado a la X de la cara activa; si no hay cara, va centrado abajo. */
+/**
+ * Subtítulo anclado a la cara que habló. Mientras alguien habla mostramos el
+ * parcial pegado a la cara activa; cuando termina, queda anclado el último
+ * texto en la posición guardada (spec §6, Modo B). Si no hay nada, no pinta.
+ */
 @Composable
 private fun CaptionOverlay(
     state: ConversationUiState,
     modifier: Modifier = Modifier,
 ) {
-    val caption = state.partialText.ifBlank { state.utterances.lastOrNull()?.text.orEmpty() }
-    if (caption.isBlank()) return
-
+    val partial = state.partialText
+    val anchored = state.anchoredCaption
     val active = state.activeFace
+
     BoxWithConstraints(modifier = modifier) {
-        val targetBias = ((active?.cx ?: 0.5f) * 2f - 1f).coerceIn(-1f, 1f)
+        // Marcadores tenues sobre las otras caras detectadas: deja claro que
+        // Voxi ve a varias personas aunque solo una hable a la vez.
+        state.faces.forEach { face ->
+            if (face !== active) {
+                val (mx, my) = anchorAboveHead(face.cx, face.cy, face.widthRatio)
+                FaceMarker(
+                    modifier = Modifier.align(
+                        BiasAlignment(
+                            (mx * 2f - 1f).coerceIn(-1f, 1f),
+                            (my * 2f - 1f).coerceIn(-0.96f, 0.96f),
+                        ),
+                    ),
+                )
+            }
+        }
+
+        val text: String
+        val cx: Float
+        val cy: Float
+        val faceW: Float
+        val accent: Color
+        val name: String
+        when {
+            partial.isNotBlank() && active != null -> {
+                text = partial; cx = active.cx; cy = active.cy; faceW = active.widthRatio
+                accent = speakerColor(state.partialSpeaker); name = state.partialSpeaker.displayName
+            }
+            partial.isNotBlank() && anchored != null -> {
+                text = partial; cx = anchored.cx; cy = anchored.cy; faceW = anchored.faceWidth
+                accent = speakerColor(state.partialSpeaker); name = state.partialSpeaker.displayName
+            }
+            anchored != null -> {
+                text = anchored.text; cx = anchored.cx; cy = anchored.cy; faceW = anchored.faceWidth
+                accent = speakerColor(anchored.speaker); name = anchored.speaker.displayName
+            }
+            else -> {
+                // Hay audio pero nadie en cuadro mueve la boca: alguien habla
+                // fuera de cuadro. Con microfono mono no se puede localizar la
+                // direccion, asi que mostramos un aviso honesto arriba en vez de
+                // inventar una posicion (spec: no prometer de mas).
+                if (partial.isNotBlank()) {
+                    OffscreenBanner(
+                        text = partial,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
+                }
+                return@BoxWithConstraints
+            }
+        }
+
+        // Ancla la burbuja POR ENCIMA de la cabeza para no tapar la cara.
+        val (ax, ay) = anchorAboveHead(cx, cy, faceW)
         val bias by animateFloatAsState(
-            targetValue = targetBias,
+            targetValue = (ax * 2f - 1f).coerceIn(-1f, 1f),
             animationSpec = tween(250),
             label = "captionBias",
         )
-        // Verticalmente: encima de la cara si la hay, si no abajo del todo.
-        val verticalBias = active?.let { (it.cy * 2f - 1f).coerceIn(-0.9f, 0.9f) } ?: 0.85f
+        val verticalBias = (ay * 2f - 1f).coerceIn(-0.96f, 0.96f)
 
         Box(
             modifier = Modifier
@@ -158,24 +213,79 @@ private fun CaptionOverlay(
                 .align(BiasAlignment(bias, verticalBias)),
             contentAlignment = Alignment.Center,
         ) {
-            FloatingCaption(text = caption, anchored = active != null)
+            FloatingCaption(text = text, accent = accent, speakerName = name)
         }
     }
 }
 
+/**
+ * Punto por encima de la cabeza a partir del centro de la cara y su ancho. Si
+ * no cabe arriba (cara muy alta en el encuadre) cae al pecho.
+ */
+private fun anchorAboveHead(cx: Float, cy: Float, faceWidth: Float): Pair<Float, Float> {
+    val up = faceWidth.coerceIn(0.05f, 0.5f) * 0.9f + 0.06f
+    val above = cy - up
+    val y = if (above < 0.05f) (cy + up) else above
+    return cx.coerceIn(0.04f, 0.96f) to y.coerceIn(0.05f, 0.95f)
+}
+
 @Composable
-private fun FloatingCaption(text: String, anchored: Boolean) {
+private fun FloatingCaption(text: String, accent: Color, speakerName: String) {
     val shape = RoundedCornerShape(20.dp)
     Column(
         modifier = Modifier
             .background(VoxiSurface.copy(alpha = 0.92f), shape)
-            .border(1.dp, VoxiTeal.copy(alpha = 0.85f), shape)
+            .border(1.dp, accent.copy(alpha = 0.85f), shape)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Text(
-            text = if (anchored) "Hablante" else "Subtitulo",
+            text = speakerName,
             style = MaterialTheme.typography.labelSmall,
-            color = VoxiTeal,
+            color = accent,
+        )
+        Spacer(Modifier.size(2.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = VoxiMint,
+        )
+    }
+}
+
+/** Marcador discreto sobre una cara detectada que no es la que habla. */
+@Composable
+private fun FaceMarker(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .background(VoxiSurface.copy(alpha = 0.7f), CircleShape)
+            .border(1.dp, VoxiSlate.copy(alpha = 0.7f), CircleShape)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Text(
+            text = "\u00b7\u00b7\u00b7",
+            style = MaterialTheme.typography.labelMedium,
+            color = VoxiSlate,
+        )
+    }
+}
+
+/** Aviso cuando se escucha a alguien que no esta en el encuadre. */
+@Composable
+private fun OffscreenBanner(text: String, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = modifier
+            .padding(top = 72.dp)
+            .fillMaxWidth(0.85f)
+            .background(VoxiSurface.copy(alpha = 0.92f), shape)
+            .border(1.dp, VoxiSlate.copy(alpha = 0.7f), shape)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = "Alguien fuera de cuadro",
+            style = MaterialTheme.typography.labelSmall,
+            color = VoxiSlate,
         )
         Spacer(Modifier.size(2.dp))
         Text(

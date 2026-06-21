@@ -7,7 +7,11 @@ import androidx.lifecycle.viewModelScope
 import com.voxi.captions.audio.AudioCapture
 import com.voxi.captions.audio.ProsodyAnalyzer
 import com.voxi.captions.audio.VoskEngine
+import com.voxi.captions.data.ConversationStore
+import com.voxi.captions.data.SessionMeta
 import com.voxi.captions.export.TranscriptExporter
+import com.voxi.captions.model.AnchoredCaption
+import com.voxi.captions.model.Origin
 import com.voxi.captions.model.Speaker
 import com.voxi.captions.model.Tone
 import com.voxi.captions.model.Utterance
@@ -33,14 +37,21 @@ data class ConversationUiState(
     val isListening: Boolean = false,
     val partialText: String = "",
     val partialTone: Tone = Tone.Neutral,
-    val partialSpeaker: Speaker = Speaker.ONE,
+    val partialSpeaker: Speaker = Speaker.First,
     val manualSpeaker: Speaker? = null,
+    // Hablantes ya descubiertos por la diarizacion (para el selector manual).
+    val knownSpeakers: List<Speaker> = listOf(Speaker.First),
     val utterances: List<Utterance> = emptyList(),
     val statusMessage: String? = null,
     // Capa 3 Modo B (cámara + caras)
     val showCamera: Boolean = false,
     val faces: List<DetectedFace> = emptyList(),
     val activeFace: DetectedFace? = null,
+    val anchoredCaption: AnchoredCaption? = null,
+    // Historial (spec §10)
+    val showHistory: Boolean = false,
+    val historySessions: List<SessionMeta> = emptyList(),
+    val viewingUtterances: List<Utterance>? = null,
 )
 
 /** Resultado puntual de exportar, para mostrar un aviso de una sola vez (spec §10). */
@@ -54,6 +65,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private val speakers = SpeakerTracker()
     private val activeSpeaker = ActiveSpeaker()
     private val tts by lazy { AndroidTts(getApplication()) }
+    private val store = ConversationStore(app)
 
     private val _uiState = MutableStateFlow(ConversationUiState())
     val uiState: StateFlow<ConversationUiState> = _uiState.asStateFlow()
@@ -63,6 +75,10 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private var nextId = 0L
     private var captureJob: Job? = null
+    private var saveJob: Job? = null
+
+    // Id de la sesión actual (timestamp de inicio) para el guardado automático.
+    private var sessionId = System.currentTimeMillis()
 
     // Watchdog (spec §4): reinicia Vosk si hay audio pero no hay parciales.
     private var lastProgressMs = System.currentTimeMillis()
@@ -91,8 +107,31 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         captureJob = viewModelScope.launch(Dispatchers.IO) {
             launch { runWatchdog() }
             runCatching {
+                var ttsMuted = false
                 audio.frames().collect { buffer ->
                     if (!vosk.isReady) return@collect
+                    // Fix del eco del TTS (spec §7): mientras el telefono habla en
+                    // voz alta, su propia voz entra por el microfono. Si la
+                    // alimentamos a Vosk, se transcribe y la diarizacion la cuenta
+                    // como un "hablante nuevo". Por eso, mientras el TTS suena (mas
+                    // una cola corta), descartamos el audio propio.
+                    if (tts.isSpeaking) {
+                        if (!ttsMuted) {
+                            ttsMuted = true
+                            if (_uiState.value.partialText.isNotEmpty()) {
+                                _uiState.update { it.copy(partialText = "") }
+                            }
+                        }
+                        return@collect
+                    }
+                    if (ttsMuted) {
+                        // Al terminar el TTS, descarta lo que Vosk haya bufferizado
+                        // de la voz del telefono para no fijarlo como una frase.
+                        ttsMuted = false
+                        vosk.reset()
+                        prosody.reset()
+                        return@collect
+                    }
                     // Un mismo buffer alimenta a Vosk y al análisis de tono (spec §2).
                     prosody.feed(buffer, buffer.size)
                     when (val r = vosk.accept(buffer, buffer.size)) {
@@ -127,11 +166,23 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         val pending = vosk.flush()
         if (pending is VoskEngine.Recognition.Final) addUtterance(pending.text, prosody.finishUtterance())
         _uiState.update { it.copy(isListening = false, partialText = "") }
+        saveNow()
     }
 
     /** Vía de regreso (spec §7): la persona sorda escribe y el teléfono lo dice. */
     fun speak(text: String) {
-        tts.speak(text)
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        // Al hablar, el gate anti-eco de startListening descarta el audio propio
+        // mientras el TTS suena, para que no se transcriba como otro hablante.
+        tts.speak(clean)
+        _uiState.update { state ->
+            state.copy(
+                utterances = state.utterances +
+                    Utterance(id = nextId++, text = clean, origin = Origin.SELF),
+            )
+        }
+        scheduleSave()
     }
 
     /** Exporta la conversación a un .txt en Descargas (spec §7 extra). */
@@ -147,10 +198,68 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Empieza una conversación nueva (la anterior queda guardada en el historial). */
+    fun startNewConversation() {
+        saveNow()
+        nextId = 0
+        sessionId = System.currentTimeMillis()
+        speakers.reset()
+        prosody.reset()
+        _uiState.update {
+            it.copy(
+                utterances = emptyList(),
+                partialText = "",
+                anchoredCaption = null,
+                knownSpeakers = speakers.knownSpeakers,
+            )
+        }
+    }
+
+    // --- Historial (spec §10) ---
+
+    fun openHistory() {
+        viewModelScope.launch {
+            val sessions = withContext(Dispatchers.IO) { store.list() }
+            _uiState.update {
+                it.copy(showHistory = true, historySessions = sessions, viewingUtterances = null)
+            }
+        }
+    }
+
+    fun closeHistory() {
+        _uiState.update { it.copy(showHistory = false, viewingUtterances = null) }
+    }
+
+    fun openSession(id: Long) {
+        viewModelScope.launch {
+            val utts = withContext(Dispatchers.IO) { store.load(id) }
+            _uiState.update { it.copy(viewingUtterances = utts) }
+        }
+    }
+
+    fun backToHistoryList() {
+        _uiState.update { it.copy(viewingUtterances = null) }
+    }
+
+    fun deleteSession(id: Long) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.delete(id) }
+            val sessions = withContext(Dispatchers.IO) { store.list() }
+            _uiState.update { it.copy(historySessions = sessions) }
+        }
+    }
+
     /** Capa 3 Modo B: alterna entre el chat espacial y la vista de cámara. */
     fun setShowCamera(show: Boolean) {
         if (!show) activeSpeaker.reset()
-        _uiState.update { it.copy(showCamera = show, faces = emptyList(), activeFace = null) }
+        _uiState.update {
+            it.copy(
+                showCamera = show,
+                faces = emptyList(),
+                activeFace = null,
+                anchoredCaption = if (show) it.anchoredCaption else null,
+            )
+        }
     }
 
     fun toggleCamera() = setShowCamera(!_uiState.value.showCamera)
@@ -171,20 +280,54 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     fun setSpeaker(speaker: Speaker?) {
         speakers.setManual(speaker)
         _uiState.update {
-            it.copy(manualSpeaker = speaker, partialSpeaker = speakers.currentSpeaker)
+            it.copy(
+                manualSpeaker = speaker,
+                partialSpeaker = speakers.currentSpeaker,
+                knownSpeakers = speakers.knownSpeakers,
+            )
         }
     }
 
     private fun addUtterance(text: String, tone: Tone) {
-        val speaker = speakers.classify(tone.pitch)
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        // La diarización usa la huella de voz de esta intervención (no solo pitch).
+        val speaker = speakers.classify(prosody.lastVoiceProfile())
+        val utterance =
+            Utterance(id = nextId++, text = clean, tone = tone, speaker = speaker, origin = Origin.HEARD)
         _uiState.update { state ->
+            // En cámara, "pega" lo dicho a la cara activa para que quede anclado.
+            val anchored = if (state.showCamera) {
+                state.activeFace?.let { f -> AnchoredCaption(clean, tone, speaker, f.cx, f.cy, f.widthRatio) }
+                    ?: state.anchoredCaption
+            } else {
+                state.anchoredCaption
+            }
             state.copy(
-                utterances = state.utterances +
-                    Utterance(id = nextId++, text = text, tone = tone, speaker = speaker),
+                utterances = state.utterances + utterance,
                 partialText = "",
                 partialSpeaker = speakers.currentSpeaker,
+                knownSpeakers = speakers.knownSpeakers,
+                anchoredCaption = anchored,
             )
         }
+        scheduleSave()
+    }
+
+    /** Guardado automático con un pequeño debounce para no escribir en cada frase. */
+    private fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = viewModelScope.launch {
+            delay(800)
+            saveNow()
+        }
+    }
+
+    private fun saveNow() {
+        val current = _uiState.value.utterances
+        if (current.isEmpty()) return
+        val id = sessionId
+        viewModelScope.launch(Dispatchers.IO) { store.save(id, current) }
     }
 
     private suspend fun runWatchdog() {
@@ -205,6 +348,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        saveNow()
         captureJob?.cancel()
         vosk.close()
         tts.shutdown()

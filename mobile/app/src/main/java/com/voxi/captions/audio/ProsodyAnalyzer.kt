@@ -1,6 +1,7 @@
 package com.voxi.captions.audio
 
 import com.voxi.captions.model.Tone
+import com.voxi.captions.model.VoiceProfile
 import kotlin.math.log10
 import kotlin.math.sqrt
 
@@ -8,6 +9,9 @@ import kotlin.math.sqrt
  * Analiza la prosodia del audio crudo (spec §5): volumen (RMS), pitch
  * (autocorrelación) y ritmo (onsets por segundo). Suaviza con EMA y entrega
  * un [Tone] con valores normalizados a 0..1.
+ *
+ * Además, al cerrar cada intervención calcula un [VoiceProfile] (huella de voz)
+ * con la mediana y la dispersión del pitch, que alimenta la diarización.
  *
  * Se alimenta desde el mismo loop de IO que reparte buffers a Vosk (spec §2);
  * el coste por buffer es bajo y no toca el hilo principal.
@@ -34,6 +38,8 @@ class ProsodyAnalyzer {
         private const val VOICED_THRESHOLD = 0.3f
         // Ventana para contar onsets recientes
         private const val RHYTHM_WINDOW_MS = 2_000L
+        // Mínimo de tramas con voz para confiar en la huella de voz.
+        private const val MIN_VOICED_FRAMES = 5
     }
 
     // EMA en vivo (para el parcial)
@@ -52,6 +58,9 @@ class ProsodyAnalyzer {
     private var uttEmphasis = false
     private val pitchTrack = ArrayList<Float>()
 
+    // Huella de voz de la última intervención cerrada.
+    private var lastProfile = VoiceProfile.Unknown
+
     /** Reinicio total (watchdog del spec §4). */
     fun reset() {
         emaVolume = 0f
@@ -60,6 +69,7 @@ class ProsodyAnalyzer {
         prevVolume = 0f
         aboveOnset = false
         onsetTimestamps.clear()
+        lastProfile = VoiceProfile.Unknown
         resetUtterance()
     }
 
@@ -122,6 +132,7 @@ class ProsodyAnalyzer {
     fun finishUtterance(): Tone {
         val avgVolume = if (uttVolumeCount > 0) uttVolumeSum / uttVolumeCount else emaVolume
         val avgPitch = if (pitchTrack.isNotEmpty()) pitchTrack.average().toFloat() else emaPitch
+        lastProfile = buildProfile(avgVolume)
         val tone = Tone(
             volume = avgVolume,
             pitch = avgPitch,
@@ -131,6 +142,38 @@ class ProsodyAnalyzer {
         )
         resetUtterance()
         return tone
+    }
+
+    /** Huella de voz de la última intervención cerrada (para diarización). */
+    fun lastVoiceProfile(): VoiceProfile = lastProfile
+
+    /**
+     * Construye el vector de características de la voz a partir del recorrido de
+     * pitch: mediana (robusta) y dispersión (IQR normalizado).
+     */
+    private fun buildProfile(avgVolume: Float): VoiceProfile {
+        val voiced = pitchTrack.size >= MIN_VOICED_FRAMES
+        if (!voiced) return VoiceProfile(emaPitch, 0f, avgVolume, voiced = false)
+        val sorted = pitchTrack.sorted()
+        val median = percentile(sorted, 0.5f)
+        val q1 = percentile(sorted, 0.25f)
+        val q3 = percentile(sorted, 0.75f)
+        val spread = (q3 - q1).coerceIn(0f, 1f)
+        return VoiceProfile(
+            medianPitch = median,
+            pitchSpread = spread,
+            meanVolume = avgVolume,
+            voiced = true,
+        )
+    }
+
+    private fun percentile(sorted: List<Float>, p: Float): Float {
+        if (sorted.isEmpty()) return 0f
+        val idx = (p * (sorted.size - 1)).coerceIn(0f, (sorted.size - 1).toFloat())
+        val lo = idx.toInt()
+        val hi = (lo + 1).coerceAtMost(sorted.size - 1)
+        val frac = idx - lo
+        return sorted[lo] * (1f - frac) + sorted[hi] * frac
     }
 
     /** Detecta si el pitch del último tercio sube respecto al primero (pregunta). */

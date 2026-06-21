@@ -10,6 +10,21 @@ val VoxiViolet = Color(0xFF9B84D2) // énfasis / glow (provisional, ver spec §8
 val VoxiMint = Color(0xFFC2EDE0)   // texto alto contraste / superficies suaves
 val VoxiSlate = Color(0xFF64748B)  // texto secundario / bordes / atenuado
 
+// --- Paleta de hablantes (spec §6/§8) ---
+// Un color distinto por cada voz detectada por la diarizacion. El teal se
+// reserva para "Tu" (mensajes propios por TTS), asi que aqui no se incluye.
+// Con mas de 8 hablantes los colores se reciclan (index % size).
+val VoxiSpeakerPalette = listOf(
+    Color(0xFF57B7FF), // 1 azul
+    Color(0xFF9B84D2), // 2 violeta
+    Color(0xFFFFB454), // 3 ambar
+    Color(0xFFFF7A8A), // 4 coral
+    Color(0xFF8FD14F), // 5 lima
+    Color(0xFFE08CFF), // 6 magenta
+    Color(0xFF4DD0E1), // 7 cian
+    Color(0xFFFF6E6E), // 8 rojo
+)
+
 // --- Neutros oscuros ---
 val VoxiBg = Color(0xFF0A0E14)         // fondo base
 val VoxiBgElevated = Color(0xFF0E141D) // fondo con un punto mas de luz (gradiente)

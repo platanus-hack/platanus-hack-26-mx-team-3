@@ -1,88 +1,142 @@
 package com.voxi.captions.viewmodel
 
 import com.voxi.captions.model.Speaker
-import kotlin.math.abs
+import com.voxi.captions.model.VoiceProfile
+import kotlin.math.sqrt
 
 /**
- * Diarización para el Modo A (spec §6): decide Hablante 1 / 2 a partir del
- * pitch promedio de cada frase usando un clustering online de 2 centroides
- * (una especie de k-means incremental), con histéresis para no parpadear.
+ * Diarización por huella de voz para N hablantes (spec §6).
  *
- * - Hablante 1 = voz más grave (centroide bajo).
- * - Hablante 2 = voz más aguda (centroide alto).
+ * Antes el modelo estaba topado a 2 carriles. Ahora cada frase fija se compara
+ * contra todas las voces ya conocidas y:
+ *  - si encaja en alguna (distancia pequeña) → es esa persona;
+ *  - si no se parece a ninguna (distancia > [NEW_SPEAKER_THRESHOLD]) y aún hay
+ *    cupo → se crea un hablante nuevo con el siguiente índice/color;
+ *  - una voz que regresa vuelve a su mismo hablante (los clusters se conservan).
  *
- * Soporta bloqueo manual: si el usuario toca un carril, todo va a ese hablante
- * hasta volver a "Auto". Cero dependencia de cámara.
+ * Cada voz es una gaussiana diagonal adaptativa en el espacio (pitch mediano,
+ * dispersión de pitch). La asignación usa distancia de Mahalanobis diagonal
+ * (z-score) con piso de varianza, y una histéresis por margen para no parpadear
+ * en la frontera entre dos voces parecidas. El índice de cada hablante es
+ * estable (orden de aparición): el primero es Hablante 1, etc.
  */
 class SpeakerTracker {
 
     companion object {
-        // Velocidad con la que cada centroide sigue a su hablante.
-        private const val CENTROID_EMA = 0.25f
-        // Separación mínima de pitch para aceptar que hay un segundo hablante.
-        private const val MIN_SEPARATION = 0.10f
-        // Margen de distancia para mantener al último hablante en zona ambigua.
-        private const val HYSTERESIS = 0.04f
+        // Adaptación de la gaussiana de cada hablante (0..1; más alto = más rápido).
+        private const val ADAPT = 0.2f
+        // Piso de desviación por dimensión (evita dividir por ~0 con pocos datos).
+        private const val MIN_STD = 0.06f
+        // Varianza inicial razonable de una voz (en unidades normalizadas 0..1).
+        private const val INIT_VAR = 0.02f
+        // Distancia de Mahalanobis por encima de la cual una voz se considera
+        // desconocida y se crea un hablante nuevo.
+        private const val NEW_SPEAKER_THRESHOLD = 2.6f
+        // Margen (en distancia) para cambiar de hablante respecto al último:
+        // evita parpadear en la zona de frontera entre voces parecidas.
+        private const val SWITCH_MARGIN = 0.8f
+        // Tope de hablantes distintos (después se reusa el más cercano).
+        const val MAX_SPEAKERS = 8
     }
 
-    private var low = Float.NaN   // centroide grave  → Hablante 1
-    private var high = Float.NaN  // centroide agudo  → Hablante 2
-    private var lastSpeaker = Speaker.ONE
+    /** Gaussiana diagonal adaptativa de un hablante en el espacio (pitch, spread). */
+    private class Cluster(val index: Int, pitch: Float, spread: Float) {
+        var meanPitch = pitch
+        var meanSpread = spread
+        var varPitch = INIT_VAR
+        var varSpread = INIT_VAR
+
+        /** Distancia de Mahalanobis diagonal (z-score) al vector dado. */
+        fun distance(pitch: Float, spread: Float): Float {
+            val sp = varPitch.coerceAtLeast(MIN_STD * MIN_STD)
+            val ss = varSpread.coerceAtLeast(MIN_STD * MIN_STD)
+            val dp = pitch - meanPitch
+            val ds = spread - meanSpread
+            // El pitch pesa el doble que la dispersión (es más discriminativo).
+            return sqrt(2f * dp * dp / sp + ds * ds / ss)
+        }
+
+        /** Actualiza media y varianza por EMA hacia el nuevo vector. */
+        fun update(pitch: Float, spread: Float) {
+            val dp = pitch - meanPitch
+            meanPitch += ADAPT * dp
+            varPitch = (1f - ADAPT) * (varPitch + ADAPT * dp * dp)
+            val ds = spread - meanSpread
+            meanSpread += ADAPT * ds
+            varSpread = (1f - ADAPT) * (varSpread + ADAPT * ds * ds)
+        }
+    }
+
+    private val clusters = mutableListOf<Cluster>()
+    private var lastSpeaker = Speaker.First
     private var manual: Speaker? = null
 
     val manualSpeaker: Speaker? get() = manual
     val currentSpeaker: Speaker get() = manual ?: lastSpeaker
+
+    /** Hablantes ya descubiertos, en orden de aparición (para la UI). */
+    val knownSpeakers: List<Speaker>
+        get() = if (clusters.isEmpty()) listOf(Speaker.First)
+        else clusters.map { Speaker(it.index) }
 
     fun setManual(speaker: Speaker?) {
         manual = speaker
         if (speaker != null) lastSpeaker = speaker
     }
 
-    /** Clasifica una frase ya fijada a partir de su pitch promedio (0..1). */
-    fun classify(pitch: Float): Speaker {
+    /** Clasifica una frase ya fijada a partir de su huella de voz. */
+    fun classify(profile: VoiceProfile): Speaker {
         manual?.let { return it }
 
-        // Arranque en frío: el primer hablante define el centroide grave.
-        if (low.isNaN()) {
-            low = pitch
-            lastSpeaker = Speaker.ONE
-            return Speaker.ONE
-        }
+        // Sin voz fiable: no toques el modelo, conserva al último hablante.
+        if (!profile.voiced) return lastSpeaker
 
-        // Aún no hay segundo hablante: créalo solo si el pitch difiere claramente.
-        if (high.isNaN()) {
-            if (abs(pitch - low) >= MIN_SEPARATION) {
-                if (pitch > low) {
-                    high = pitch
-                } else {
-                    high = low
-                    low = pitch
-                }
-                lastSpeaker = if (abs(pitch - low) <= abs(pitch - high)) Speaker.ONE else Speaker.TWO
-            } else {
-                low += CENTROID_EMA * (pitch - low)
-                lastSpeaker = Speaker.ONE
-            }
+        val pitch = profile.medianPitch
+        val spread = profile.pitchSpread
+
+        // Arranque en frío: la primera voz define el Hablante 1.
+        if (clusters.isEmpty()) {
+            clusters.add(Cluster(0, pitch, spread))
+            lastSpeaker = Speaker(0)
             return lastSpeaker
         }
 
-        // Dos centroides: asigna al más cercano con histéresis.
-        val dLow = abs(pitch - low)
-        val dHigh = abs(pitch - high)
-        val speaker = when {
-            dLow + HYSTERESIS < dHigh -> Speaker.ONE
-            dHigh + HYSTERESIS < dLow -> Speaker.TWO
-            else -> lastSpeaker // zona ambigua: no cambies de hablante
+        // Voz más cercana entre las conocidas.
+        var nearest = clusters[0]
+        var nearestDist = nearest.distance(pitch, spread)
+        for (c in clusters) {
+            val d = c.distance(pitch, spread)
+            if (d < nearestDist) {
+                nearest = c
+                nearestDist = d
+            }
         }
-        if (speaker == Speaker.ONE) low += CENTROID_EMA * (pitch - low)
-        else high += CENTROID_EMA * (pitch - high)
-        lastSpeaker = speaker
-        return speaker
+
+        // No se parece a nadie conocido y hay cupo → hablante nuevo.
+        if (nearestDist > NEW_SPEAKER_THRESHOLD && clusters.size < MAX_SPEAKERS) {
+            val nuevo = Cluster(clusters.size, pitch, spread)
+            clusters.add(nuevo)
+            lastSpeaker = Speaker(nuevo.index)
+            return lastSpeaker
+        }
+
+        // Histéresis: para cambiar de hablante, el candidato debe ganarle por
+        // margen al último; si no, conserva al último (evita parpadeo).
+        val lastCluster = clusters.firstOrNull { it.index == lastSpeaker.index }
+        val chosen = if (lastCluster != null && lastCluster !== nearest) {
+            val dLast = lastCluster.distance(pitch, spread)
+            if (nearestDist + SWITCH_MARGIN < dLast) nearest else lastCluster
+        } else {
+            nearest
+        }
+
+        chosen.update(pitch, spread)
+        lastSpeaker = Speaker(chosen.index)
+        return lastSpeaker
     }
 
     fun reset() {
-        low = Float.NaN
-        high = Float.NaN
-        lastSpeaker = manual ?: Speaker.ONE
+        clusters.clear()
+        lastSpeaker = manual ?: Speaker.First
     }
 }
