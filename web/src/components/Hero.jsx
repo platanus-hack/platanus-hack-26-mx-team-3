@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 
+const DOWNLOAD_APK_URL = "#";
+
 export default function Hero() {
   const videoRef = useRef(null);
 
@@ -52,33 +54,49 @@ export default function Hero() {
       />
 
       {/* Contenido */}
-      <div className="relative z-10 flex flex-col items-center gap-10 px-6">
+      <div className="relative z-10 flex min-w-0 w-full justify-self-stretch flex-col items-center gap-10 px-6">
         <h1
           id="hero-title"
-          className="animate-hero-in max-w-[16ch] font-title text-5xl font-extrabold leading-[1.05] text-snow sm:text-6xl md:text-7xl"
+          className="animate-hero-in w-full max-w-[11ch] font-title text-[2.625rem] font-extrabold leading-[1.05] text-snow sm:max-w-[16ch] sm:text-6xl md:text-7xl"
           style={{ textShadow: "0 4px 30px rgba(0,0,0,.45)" }}
         >
           Haz <span className="highlight-gradient-text">visible</span> la conversación
         </h1>
 
-        {/* CTA debajo del texto, con indicación hacia abajo */}
-        <a
-          href="#about"
-          className="animate-cue group inline-flex items-center gap-2 rounded-full px-7 py-3.5 font-title text-base font-semibold text-night shadow-[0_12px_34px_rgba(107,127,232,.28)] transition-transform duration-300 hover:-translate-y-0.5"
-          style={{
-            background: "linear-gradient(135deg, #6b7fe8 0%, #a89ae8 100%)",
-          }}
-        >
-          Comunícate
-          <svg
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-            className="h-5 w-5 fill-none stroke-current stroke-[2.4]"
-            style={{ strokeLinecap: "round", strokeLinejoin: "round" }}
+        {/* CTAs debajo del texto */}
+        <div className="animate-cue flex w-full max-w-[320px] flex-col items-center gap-3 sm:max-w-none sm:flex-row sm:justify-center sm:gap-4">
+          <a
+            href={DOWNLOAD_APK_URL}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-[#2A2A2A] bg-night px-7 py-3.5 font-title text-base font-semibold text-snow shadow-[0_12px_34px_rgba(0,0,0,.34)] transition-transform duration-300 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] sm:w-auto"
           >
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </a>
+            Instalar APK
+            <svg
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              className="h-5 w-5 shrink-0 fill-none stroke-current stroke-[2.4]"
+              style={{ strokeLinecap: "round", strokeLinejoin: "round" }}
+            >
+              <path d="M12 3v12" />
+              <path d="m7 10 5 5 5-5" />
+              <path d="M5 21h14" />
+            </svg>
+          </a>
+
+          <a
+            href="#about"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-panel-soft px-7 py-3.5 font-title text-base font-semibold text-snow shadow-[0_12px_34px_rgba(0,0,0,.28)] transition-transform duration-300 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] sm:w-auto"
+          >
+            Conócenos
+            <svg
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              className="h-5 w-5 shrink-0 fill-none stroke-current stroke-[2.4]"
+              style={{ strokeLinecap: "round", strokeLinejoin: "round" }}
+            >
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </a>
+        </div>
       </div>
     </section>
   );
