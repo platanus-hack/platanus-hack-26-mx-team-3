@@ -155,8 +155,9 @@ class ProsodyAnalyzer {
      * pitch: mediana (robusta) y dispersión (IQR normalizado).
      */
     private fun buildProfile(avgVolume: Float): VoiceProfile {
-        val voiced = pitchTrack.size >= MIN_VOICED_FRAMES
-        if (!voiced) return VoiceProfile(emaPitch, 0f, 0.5f, avgVolume, voiced = false)
+        val frames = pitchTrack.size
+        val voiced = frames >= MIN_VOICED_FRAMES
+        if (!voiced) return VoiceProfile(emaPitch, 0f, 0.5f, avgVolume, voiced = false, frames = frames)
         val sorted = pitchTrack.sorted()
         val median = percentile(sorted, 0.5f)
         val q1 = percentile(sorted, 0.25f)
@@ -170,6 +171,7 @@ class ProsodyAnalyzer {
             brightness = brightness,
             meanVolume = avgVolume,
             voiced = true,
+            frames = frames,
         )
     }
 

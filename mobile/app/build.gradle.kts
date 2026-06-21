@@ -1,7 +1,19 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+// Lee claves desde local.properties (que esta en .gitignore) para no
+// hardcodearlas en el repo. Si no existen, quedan vacias y la app cae a sus
+// alternativas offline (TTS nativo / plantillas).
+val secrets = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) FileInputStream(f).use { load(it) }
+}
+fun secret(name: String): String = secrets.getProperty(name).orEmpty()
 
 android {
     namespace = "com.voxi.captions"
@@ -19,6 +31,14 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Claves y voces (spec §5/§7). Las keys vienen de local.properties; los
+        // voice_id de ElevenLabs son fijos (no son secretos).
+        buildConfigField("String", "ELEVENLABS_API_KEY", "\"${secret("ELEVENLABS_API_KEY")}\"")
+        buildConfigField("String", "GEMINI_API_KEY", "\"${secret("GEMINI_API_KEY")}\"")
+        buildConfigField("String", "ELEVEN_VOICE_MALE", "\"iVUdnmny2hQCx0HoQmTH\"")
+        buildConfigField("String", "ELEVEN_VOICE_FEMALE", "\"p5EUznrYaWnafKvUkNiR\"")
+        buildConfigField("String", "ELEVEN_VOICE_NEUTRAL", "\"Cq8gMra8w0trADKyB4Hi\"")
     }
 
     buildTypes {
@@ -34,6 +54,12 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+    // El modelo de embeddings (.onnx) debe quedar SIN comprimir en el APK para
+    // que sherpa-onnx lo pueda leer directo desde assets.
+    androidResources {
+        noCompress.add("onnx")
     }
 }
 

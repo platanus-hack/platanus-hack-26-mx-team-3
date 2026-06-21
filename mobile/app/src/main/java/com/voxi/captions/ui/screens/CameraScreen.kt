@@ -46,6 +46,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.voxi.captions.ui.components.ComposeBar
+import com.voxi.captions.ui.components.SmartReplyChips
 import com.voxi.captions.ui.theme.VoxiBg
 import com.voxi.captions.ui.theme.VoxiMint
 import com.voxi.captions.ui.theme.VoxiSlate
@@ -67,6 +69,7 @@ fun CameraScreen(
     state: ConversationUiState,
     onFacesDetected: (List<DetectedFace>) -> Unit,
     onToggleCamera: () -> Unit,
+    onSend: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -126,10 +129,28 @@ fun CameraScreen(
             faceCount = state.faces.size,
             onToggleCamera = onToggleCamera,
             modifier = Modifier
+                .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(12.dp),
         )
+
+        // Via de regreso tambien en camara (spec §7): antes solo se veian las
+        // caras y no se podia escribir. Incluye respuestas sugeridas con IA y la
+        // barra de escritura, que se eleva con el teclado.
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            if (state.suggestedReplies.isNotEmpty()) {
+                SmartReplyChips(replies = state.suggestedReplies, onPick = onSend)
+                Spacer(Modifier.size(10.dp))
+            }
+            ComposeBar(onSend = onSend)
+        }
     }
 }
 

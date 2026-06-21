@@ -7,6 +7,10 @@
 
     <!-- Capa 3 Modo B: camara para anclar subtitulos a la cara que habla -->
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Voz humana de ElevenLabs y respuestas sugeridas con Gemini (spec §5/§7).
+         Todo el nucleo sigue funcionando offline si no hay internet. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature
         android:name="android.hardware.camera.any"
         android:required="false" />

@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.voxi.captions.audio.AudioCapture
 import com.voxi.captions.audio.ProsodyAnalyzer
+import com.voxi.captions.audio.SpeakerEmbedder
 import com.voxi.captions.audio.VoskEngine
 import com.voxi.captions.data.ConversationStore
 import com.voxi.captions.data.SessionMeta
@@ -18,7 +19,10 @@ import com.voxi.captions.model.Speaker
 import com.voxi.captions.model.Tone
 import com.voxi.captions.model.Utterance
 import com.voxi.captions.model.VoiceType
+import com.voxi.captions.ai.OfflineReplies
+import com.voxi.captions.ai.SmartReplyService
 import com.voxi.captions.tts.AndroidTts
+import com.voxi.captions.tts.ElevenLabsTts
 import com.voxi.captions.vision.ActiveSpeaker
 import com.voxi.captions.vision.DetectedFace
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +60,9 @@ data class ConversationUiState(
     // Voz del TTS elegida al inicio (spec §7).
     val voiceType: VoiceType = VoiceType.Default,
     val needsVoiceSelection: Boolean = false,
+    // Respuestas sugeridas con IA (estilo LinkedIn): hasta 3 frases que la
+    // persona sorda puede tocar para que el telefono las diga (spec §7).
+    val suggestedReplies: List<String> = emptyList(),
     // Historial (spec §10)
     val showHistory: Boolean = false,
     val historySessions: List<SessionMeta> = emptyList(),
@@ -70,9 +77,15 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private val vosk = VoskEngine()
     private val audio = AudioCapture()
     private val prosody = ProsodyAnalyzer()
+    // Huella neuronal de voz (sherpa-onnx) para una diarizacion mas robusta; es
+    // opcional: si el modelo no carga, SpeakerTracker usa solo la heuristica.
+    private val embedder = SpeakerEmbedder(app)
     private val speakers = SpeakerTracker(SpeakerStore(app))
     private val activeSpeaker = ActiveSpeaker()
     private val tts by lazy { AndroidTts(getApplication()) }
+    // Voz humana de ElevenLabs (spec §7): si hay clave e internet sintetiza una
+    // voz expresiva; si no, cae al TTS nativo de Android.
+    private val elevenLabs by lazy { ElevenLabsTts(getApplication()) }
     private val store = ConversationStore(app)
     private val settings = SettingsStore(app)
 
@@ -85,6 +98,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private var nextId = 0L
     private var captureJob: Job? = null
     private var saveJob: Job? = null
+    private var replyJob: Job? = null
 
     // Id de la sesión actual (timestamp de inicio) para el guardado automático.
     private var sessionId = System.currentTimeMillis()
@@ -96,12 +110,21 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private var emaPan = 0f
     private var hasPan = false
 
+    // Buffer PCM de la intervencion en curso (mono 16 kHz). Al cerrarla se le
+    // calcula el embedding neuronal del hablante (diarizacion hibrida).
+    private var uttBuf = ShortArray(AudioCapture.SAMPLE_RATE * 4)
+    private var uttLen = 0
+
     init {
         // Voz del TTS: aplica la elegida (o marca que falta elegir, 1a vez).
         _uiState.update {
             it.copy(voiceType = settings.voiceType, needsVoiceSelection = !settings.voiceChosen)
         }
         tts.setVoiceType(settings.voiceType)
+        elevenLabs.setVoiceType(settings.voiceType)
+        // Carga el modelo de embeddings en segundo plano (pesado ~25 MB); si
+        // falla, la app sigue con la diarizacion heuristica.
+        viewModelScope.launch(Dispatchers.Default) { embedder.load() }
         viewModelScope.launch {
             runCatching { vosk.load(getApplication()) }
                 .onSuccess { _uiState.update { it.copy(isModelLoading = false) } }
@@ -133,7 +156,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                     // alimentamos a Vosk, se transcribe y la diarizacion la cuenta
                     // como un "hablante nuevo". Por eso, mientras el TTS suena (mas
                     // una cola corta), descartamos el audio propio.
-                    if (tts.isSpeaking) {
+                    if (tts.isSpeaking || elevenLabs.isSpeaking) {
                         if (!ttsMuted) {
                             ttsMuted = true
                             if (_uiState.value.partialText.isNotEmpty()) {
@@ -148,17 +171,23 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         ttsMuted = false
                         vosk.reset()
                         prosody.reset()
+                        resetPcm()
                         return@collect
-                    }
-                    // Modo C (spec §6): el paneo L/R de cada buffer estima la
-                    // direccion del sonido; se suaviza para ubicar al hablante
-                    // fuera de cuadro en la camara.
-                    frame.pan?.let { p ->
-                        emaPan = if (hasPan) emaPan * 0.8f + p * 0.2f else p
-                        hasPan = true
                     }
                     // Un mismo buffer alimenta a Vosk y al análisis de tono (spec §2).
                     prosody.feed(frame.samples, frame.length)
+                    // Y se acumula para el embedding del hablante al cerrar la frase.
+                    appendPcm(frame.samples, frame.length)
+                    // Modo C (spec §6): el paneo L/R de cada buffer estima la
+                    // direccion del sonido; se suaviza para ubicar al hablante
+                    // fuera de cuadro. Solo se actualiza con voz clara (no con
+                    // ruido de fondo) para que la direccion siga al que habla.
+                    frame.pan?.let { p ->
+                        if (prosody.current().volume > 0.3f) {
+                            emaPan = if (hasPan) emaPan * 0.85f + p * 0.15f else p
+                            hasPan = true
+                        }
+                    }
                     when (val r = vosk.accept(frame.samples, frame.length)) {
                         is VoskEngine.Recognition.Partial -> {
                             lastProgressMs = System.currentTimeMillis()
@@ -173,7 +202,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         is VoskEngine.Recognition.Final -> {
                             lastProgressMs = System.currentTimeMillis()
-                            addUtterance(r.text, prosody.finishUtterance())
+                            val emb = if (embedder.isReady) embedder.embed(uttBuf, uttLen) else null
+                            resetPcm()
+                            addUtterance(r.text, prosody.finishUtterance(), emb)
                         }
                         VoskEngine.Recognition.None -> Unit
                     }
@@ -190,7 +221,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         captureJob?.cancel()
         captureJob = null
         val pending = vosk.flush()
-        if (pending is VoskEngine.Recognition.Final) addUtterance(pending.text, prosody.finishUtterance())
+        if (pending is VoskEngine.Recognition.Final) {
+            val emb = if (embedder.isReady) embedder.embed(uttBuf, uttLen) else null
+            resetPcm()
+            addUtterance(pending.text, prosody.finishUtterance(), emb)
+        }
         _uiState.update { it.copy(isListening = false, partialText = "") }
         saveNow()
     }
@@ -201,11 +236,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         if (clean.isEmpty()) return
         // Al hablar, el gate anti-eco de startListening descarta el audio propio
         // mientras el TTS suena, para que no se transcriba como otro hablante.
-        tts.speak(clean)
+        // Primero intenta la voz humana de ElevenLabs; si no se puede, TTS nativo.
+        elevenLabs.speak(clean) { fallback -> tts.speak(fallback) }
         _uiState.update { state ->
             state.copy(
                 utterances = state.utterances +
                     Utterance(id = nextId++, text = clean, origin = Origin.SELF),
+                // Ya respondio: limpia los chips hasta que vuelva a escuchar algo.
+                suggestedReplies = emptyList(),
             )
         }
         scheduleSave()
@@ -216,6 +254,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         settings.voiceType = type
         settings.voiceChosen = true
         tts.setVoiceType(type)
+        elevenLabs.setVoiceType(type)
         _uiState.update { it.copy(voiceType = type, needsVoiceSelection = false) }
     }
 
@@ -240,12 +279,15 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         // Reset suave: conserva las voces aprendidas (memoria tipo Alexa).
         speakers.softReset()
         prosody.reset()
+        resetPcm()
+        replyJob?.cancel()
         _uiState.update {
             it.copy(
                 utterances = emptyList(),
                 partialText = "",
                 anchoredCaption = null,
                 knownSpeakers = speakers.knownSpeakers,
+                suggestedReplies = emptyList(),
             )
         }
     }
@@ -323,11 +365,12 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun addUtterance(text: String, tone: Tone) {
+    private fun addUtterance(text: String, tone: Tone, embedding: FloatArray? = null) {
         val clean = text.trim()
         if (clean.isEmpty()) return
-        // La diarización usa la huella de voz de esta intervención (no solo pitch).
-        val speaker = speakers.classify(prosody.lastVoiceProfile())
+        // La diarización usa la huella de voz de esta intervención: si hay
+        // embedding neuronal (sherpa-onnx) manda; si no, cae a la heuristica.
+        val speaker = speakers.classify(prosody.lastVoiceProfile(), embedding)
         val utterance =
             Utterance(id = nextId++, text = clean, tone = tone, speaker = speaker, origin = Origin.HEARD)
         _uiState.update { state ->
@@ -347,6 +390,48 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         scheduleSave()
+        refreshSuggestions()
+    }
+
+    /**
+     * Pide a la IA hasta 3 respuestas cortas con base en lo ultimo que se
+     * escucho (spec §7). Si Gemini no esta disponible, usa plantillas offline
+     * para que los chips nunca queden vacios.
+     */
+    private fun refreshSuggestions() {
+        val heard = _uiState.value.utterances
+            .filter { it.origin == Origin.HEARD }
+            .takeLast(6)
+            .map { it.text }
+        if (heard.isEmpty()) {
+            _uiState.update { it.copy(suggestedReplies = emptyList()) }
+            return
+        }
+        replyJob?.cancel()
+        replyJob = viewModelScope.launch {
+            val replies = SmartReplyService.suggest(heard)
+            val final = replies.ifEmpty { OfflineReplies.defaults }
+            _uiState.update { it.copy(suggestedReplies = final) }
+        }
+    }
+
+    /** Acumula el PCM de la intervencion en curso (recortado a ~12 s). */
+    private fun appendPcm(samples: ShortArray, length: Int) {
+        if (length <= 0) return
+        val max = AudioCapture.SAMPLE_RATE * 12
+        if (uttLen >= max) return
+        val need = uttLen + length
+        if (need > uttBuf.size) {
+            uttBuf = uttBuf.copyOf(maxOf(need, uttBuf.size * 2).coerceAtMost(max))
+        }
+        val n = length.coerceAtMost(uttBuf.size - uttLen)
+        if (n <= 0) return
+        System.arraycopy(samples, 0, uttBuf, uttLen, n)
+        uttLen += n
+    }
+
+    private fun resetPcm() {
+        uttLen = 0
     }
 
     /** Guardado automático con un pequeño debounce para no escribir en cada frase. */
@@ -373,6 +458,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     vosk.reset()
                     prosody.reset()
+                    resetPcm()
                     speakers.softReset()
                 }
                 lastProgressMs = System.currentTimeMillis()
@@ -387,5 +473,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         captureJob?.cancel()
         vosk.close()
         tts.shutdown()
+        elevenLabs.shutdown()
+        embedder.shutdown()
     }
 }

@@ -129,6 +129,7 @@ private fun VoxiApp() {
             state = state,
             onFacesDetected = viewModel::onFacesDetected,
             onToggleCamera = { viewModel.setShowCamera(false) },
+            onSend = viewModel::speak,
             modifier = Modifier.fillMaxSize(),
         )
         else -> ConversationScreen(

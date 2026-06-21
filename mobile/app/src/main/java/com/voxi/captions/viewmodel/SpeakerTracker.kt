@@ -42,6 +42,30 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
         private const val W_PITCH = 2.0f
         private const val W_SPREAD = 1.0f
         private const val W_BRIGHT = 1.5f
+        // Tramas con voz minimas para considerar la huella "fuerte". Solo una
+        // huella fuerte puede CREAR un hablante nuevo o MOVER el centro de una
+        // voz; las debiles (frases muy cortas) se asignan pero no contaminan.
+        // Esto evita los duplicados por frases sueltas.
+        private const val STRONG_FRAMES = 12
+        // Distancia (euclidea ponderada entre medias) por debajo de la cual dos
+        // voces se consideran la misma y se fusionan (limpia duplicados ya
+        // creados cuando una persona quedo partida en dos).
+        private const val MERGE_DIST = 0.16f
+        // "Madurez" inicial de las voces cargadas de disco: ya son establecidas,
+        // no deben fusionarse ni desplazarse a la ligera.
+        private const val MATURE_COUNT = 10
+
+        // --- Diarizacion neuronal (sherpa-onnx, hibrida) ---
+        // Cuando hay un embedding disponible, manda sobre la heuristica. Son
+        // similitudes COSENO entre vectores L2-normalizados (1 = identico).
+        // Coseno >= esto: misma persona (asigna y adapta el centro).
+        private const val EMB_SAME = 0.55f
+        // Coseno del mejor < esto: claramente desconocida -> hablante nuevo.
+        private const val EMB_NEW = 0.40f
+        // Dos centros con coseno > esto son la misma voz partida -> fusionar.
+        private const val EMB_MERGE = 0.72f
+        // Adaptacion del centro de embedding por EMA (0..1).
+        private const val EMB_ADAPT = 0.30f
     }
 
     /** Gaussiana diagonal adaptativa de un hablante en (pitch, spread, brillo). */
@@ -58,6 +82,11 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
         var varPitch = INIT_VAR
         var varSpread = INIT_VAR
         var varBright = INIT_VAR
+        // Cuantas intervenciones se han asignado a esta voz (su "peso").
+        var count = 1
+        // Centro del embedding neuronal (sherpa-onnx), L2-normalizado, o null si
+        // esta voz aun no tiene huella neuronal asociada.
+        var emb: FloatArray? = null
 
         /** Distancia de Mahalanobis diagonal (z-score) ponderada al vector dado. */
         fun distance(pitch: Float, spread: Float, bright: Float): Float {
@@ -104,6 +133,7 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
             c.varPitch = p.varPitch
             c.varSpread = p.varSpread
             c.varBright = p.varBright
+            c.count = MATURE_COUNT
             clusters.add(c)
         }
         nextIndex = (clusters.maxOfOrNull { it.index } ?: -1) + 1
@@ -132,8 +162,11 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
     }
 
     /** Clasifica una frase ya fijada a partir de su huella de voz. */
-    fun classify(profile: VoiceProfile): Speaker {
+    fun classify(profile: VoiceProfile, embedding: FloatArray? = null): Speaker {
         manual?.let { return it }
+
+        // Si hay huella neuronal (sherpa-onnx), manda sobre la heuristica.
+        if (embedding != null) return classifyByEmbedding(profile, embedding)
 
         // Sin voz fiable: no toques el modelo, conserva al último hablante.
         if (!profile.voiced) return lastSpeaker
@@ -141,6 +174,8 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
         val pitch = profile.medianPitch
         val spread = profile.pitchSpread
         val bright = profile.brightness
+        // Una huella es "fuerte" si se construyo con suficientes tramas de voz.
+        val strong = profile.frames >= STRONG_FRAMES
 
         // Arranque en frío: la primera voz define el Hablante 1.
         if (clusters.isEmpty()) {
@@ -162,8 +197,10 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
             }
         }
 
-        // No se parece a nadie conocido y hay cupo → hablante nuevo.
-        if (nearestDist > NEW_SPEAKER_THRESHOLD && clusters.size < MAX_SPEAKERS) {
+        // No se parece a nadie conocido y hay cupo → hablante nuevo, PERO solo si
+        // la huella es fuerte. Una frase corta y rara NO crea un duplicado: se
+        // asigna a la voz mas cercana sin tocar su modelo.
+        if (nearestDist > NEW_SPEAKER_THRESHOLD && clusters.size < MAX_SPEAKERS && strong) {
             val nuevo = Cluster(nextIndex, null, pitch, spread, bright)
             clusters.add(nuevo)
             lastSpeaker = Speaker(nuevo.index)
@@ -182,10 +219,212 @@ class SpeakerTracker(private val store: SpeakerStore? = null) {
             nearest
         }
 
-        chosen.update(pitch, spread, bright)
-        lastSpeaker = Speaker(chosen.index)
+        // Solo las huellas fuertes desplazan el centro de la voz; asi una frase
+        // corta no "arrastra" el modelo hacia el ruido.
+        if (strong) {
+            chosen.update(pitch, spread, bright)
+            chosen.count++
+            mergeNearDuplicates()
+        }
+        lastSpeaker = Speaker(
+            clusters.firstOrNull { it.index == chosen.index }?.index ?: chosen.index,
+        )
         persist()
         return lastSpeaker
+    }
+
+    /** Distancia euclidea ponderada entre los centros de dos voces. */
+    private fun centroidDistance(a: Cluster, b: Cluster): Float {
+        val dp = a.meanPitch - b.meanPitch
+        val ds = a.meanSpread - b.meanSpread
+        val db = a.meanBright - b.meanBright
+        return sqrt(W_PITCH * dp * dp + W_SPREAD * ds * ds + W_BRIGHT * db * db)
+    }
+
+    /**
+     * Fusiona voces que quedaron demasiado cerca (la misma persona partida en
+     * dos). Conserva la de mayor [Cluster.count] (mas evidencia) y le suma la
+     * otra. Reapunta [lastSpeaker] al superviviente si hace falta.
+     */
+    private fun mergeNearDuplicates() {
+        var merged = true
+        while (merged && clusters.size > 1) {
+            merged = false
+            outer@ for (i in clusters.indices) {
+                for (j in i + 1 until clusters.size) {
+                    val a = clusters[i]
+                    val b = clusters[j]
+                    if (centroidDistance(a, b) < MERGE_DIST) {
+                        val keep = if (a.count >= b.count) a else b
+                        val drop = if (keep === a) b else a
+                        // Mezcla ponderada de los centros hacia el superviviente.
+                        val total = (keep.count + drop.count).coerceAtLeast(1)
+                        val w = drop.count.toFloat() / total
+                        keep.meanPitch += w * (drop.meanPitch - keep.meanPitch)
+                        keep.meanSpread += w * (drop.meanSpread - keep.meanSpread)
+                        keep.meanBright += w * (drop.meanBright - keep.meanBright)
+                        keep.count += drop.count
+                        if (keep.name == null) keep.name = drop.name
+                        if (lastSpeaker.index == drop.index) lastSpeaker = Speaker(keep.index)
+                        clusters.remove(drop)
+                        merged = true
+                        break@outer
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Diarizacion por embedding (sherpa-onnx) ---
+
+    /**
+     * Clasifica usando la huella neuronal (coseno). Conserva los mismos indices
+     * y colores que la via heuristica para no romper la UI, y sigue alimentando
+     * las medias de pitch/timbre como respaldo si el modelo dejara de estar.
+     */
+    private fun classifyByEmbedding(profile: VoiceProfile, x: FloatArray): Speaker {
+        val pitch = profile.medianPitch
+        val spread = profile.pitchSpread
+        val bright = profile.brightness
+
+        // Arranque en frio total: primera voz = Hablante 1.
+        if (clusters.isEmpty()) {
+            val c = Cluster(nextIndex, null, pitch, spread, bright)
+            c.emb = x.copyOf()
+            clusters.add(c)
+            lastSpeaker = Speaker(nextIndex)
+            nextIndex++
+            persist()
+            return lastSpeaker
+        }
+
+        // Voces que ya tienen embedding asociado.
+        val withEmb = clusters.filter { it.emb != null }
+        if (withEmb.isEmpty()) {
+            // Puente: aun nadie tiene embedding (voces cargadas de disco o
+            // descubiertas por la heuristica antes de que cargara el modelo). En
+            // vez de crear un duplicado, pega este embedding a la voz mas
+            // parecida segun la heuristica.
+            val seed = heuristicNearest(profile)
+            seed.emb = x.copyOf()
+            if (profile.voiced) {
+                seed.update(pitch, spread, bright)
+                seed.count++
+            }
+            lastSpeaker = Speaker(seed.index)
+            persist()
+            return lastSpeaker
+        }
+
+        // Mejor coincidencia por coseno.
+        var best = withEmb[0]
+        var bestSim = cosine(best.emb!!, x)
+        for (c in withEmb) {
+            val s = cosine(c.emb!!, x)
+            if (s > bestSim) {
+                bestSim = s
+                best = c
+            }
+        }
+
+        // Claramente desconocida y hay cupo -> hablante nuevo.
+        if (bestSim < EMB_NEW && clusters.size < MAX_SPEAKERS) {
+            val c = Cluster(nextIndex, null, pitch, spread, bright)
+            c.emb = x.copyOf()
+            clusters.add(c)
+            lastSpeaker = Speaker(nextIndex)
+            nextIndex++
+            persist()
+            return lastSpeaker
+        }
+
+        // Coincide con claridad: asigna y adapta el centro. En la zona gris
+        // (entre NEW y SAME) se asigna al mejor pero NO se mueve el centro, para
+        // no contaminar la voz con una frase ambigua.
+        if (bestSim >= EMB_SAME) {
+            updateEmb(best, x)
+            if (profile.voiced) best.update(pitch, spread, bright)
+            best.count++
+            mergeNearDuplicatesEmb()
+        }
+        lastSpeaker = Speaker(best.index)
+        persist()
+        return lastSpeaker
+    }
+
+    /** Voz mas cercana por la heuristica (para el puente de embeddings). */
+    private fun heuristicNearest(profile: VoiceProfile): Cluster {
+        if (!profile.voiced) {
+            return clusters.firstOrNull { it.index == lastSpeaker.index } ?: clusters[0]
+        }
+        var nearest = clusters[0]
+        var nearestDist = nearest.distance(profile.medianPitch, profile.pitchSpread, profile.brightness)
+        for (c in clusters) {
+            val d = c.distance(profile.medianPitch, profile.pitchSpread, profile.brightness)
+            if (d < nearestDist) {
+                nearest = c
+                nearestDist = d
+            }
+        }
+        return nearest
+    }
+
+    /** Coseno entre dos vectores (los embeddings ya vienen ~L2-normalizados). */
+    private fun cosine(a: FloatArray, b: FloatArray): Float {
+        val n = minOf(a.size, b.size)
+        var dot = 0f
+        var na = 0f
+        var nb = 0f
+        for (i in 0 until n) {
+            dot += a[i] * b[i]
+            na += a[i] * a[i]
+            nb += b[i] * b[i]
+        }
+        val den = sqrt(na) * sqrt(nb)
+        return if (den < 1e-6f) 0f else dot / den
+    }
+
+    /** Adapta el centro de embedding hacia el nuevo vector y renormaliza. */
+    private fun updateEmb(cluster: Cluster, x: FloatArray) {
+        val cur = cluster.emb
+        if (cur == null) {
+            cluster.emb = x.copyOf()
+            return
+        }
+        val n = minOf(cur.size, x.size)
+        var norm = 0f
+        for (i in 0 until n) {
+            cur[i] += EMB_ADAPT * (x[i] - cur[i])
+            norm += cur[i] * cur[i]
+        }
+        val s = sqrt(norm)
+        if (s > 1e-6f) for (i in 0 until n) cur[i] /= s
+    }
+
+    /** Fusiona voces cuyos embeddings quedaron casi identicos (misma persona). */
+    private fun mergeNearDuplicatesEmb() {
+        var merged = true
+        while (merged && clusters.size > 1) {
+            merged = false
+            outer@ for (i in clusters.indices) {
+                for (j in i + 1 until clusters.size) {
+                    val a = clusters[i]
+                    val b = clusters[j]
+                    val ea = a.emb
+                    val eb = b.emb
+                    if (ea != null && eb != null && cosine(ea, eb) > EMB_MERGE) {
+                        val keep = if (a.count >= b.count) a else b
+                        val drop = if (keep === a) b else a
+                        keep.count += drop.count
+                        if (keep.name == null) keep.name = drop.name
+                        if (lastSpeaker.index == drop.index) lastSpeaker = Speaker(keep.index)
+                        clusters.remove(drop)
+                        merged = true
+                        break@outer
+                    }
+                }
+            }
+        }
     }
 
     /**

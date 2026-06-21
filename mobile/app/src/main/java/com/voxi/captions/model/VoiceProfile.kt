@@ -16,6 +16,10 @@ package com.voxi.captions.model
  *  - [meanVolume]: energía media (0..1), solo informativa.
  *  - [voiced]: hubo suficientes tramas con voz clara como para confiar en el
  *    vector. Si es false, la diarización mantiene al último hablante.
+ *  - [frames]: cuantas tramas con voz se usaron para construir el vector. Es la
+ *    "confianza" de la huella: con pocas tramas el vector es ruidoso, asi que la
+ *    diarizacion exige mas evidencia antes de crear un hablante nuevo (evita
+ *    duplicados por frases muy cortas).
  */
 data class VoiceProfile(
     val medianPitch: Float,
@@ -23,8 +27,9 @@ data class VoiceProfile(
     val brightness: Float,
     val meanVolume: Float,
     val voiced: Boolean,
+    val frames: Int = 0,
 ) {
     companion object {
-        val Unknown = VoiceProfile(0.5f, 0f, 0.5f, 0f, voiced = false)
+        val Unknown = VoiceProfile(0.5f, 0f, 0.5f, 0f, voiced = false, frames = 0)
     }
 }

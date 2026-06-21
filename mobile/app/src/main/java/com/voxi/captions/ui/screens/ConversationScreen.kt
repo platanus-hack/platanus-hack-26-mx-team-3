@@ -48,6 +48,7 @@ import com.voxi.captions.model.Speaker
 import com.voxi.captions.model.Utterance
 import com.voxi.captions.ui.components.ChatBubble
 import com.voxi.captions.ui.components.ComposeBar
+import com.voxi.captions.ui.components.SmartReplyChips
 import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
 import com.voxi.captions.ui.theme.VoxiBrandGradient
@@ -115,6 +116,11 @@ fun ConversationScreen(
                 color = VoxiSlate,
                 modifier = Modifier.padding(top = 8.dp),
             )
+        }
+
+        if (state.suggestedReplies.isNotEmpty()) {
+            Spacer(Modifier.size(10.dp))
+            SmartReplyChips(replies = state.suggestedReplies, onPick = onSend)
         }
 
         Spacer(Modifier.size(10.dp))

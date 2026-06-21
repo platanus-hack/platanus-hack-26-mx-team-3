@@ -32,8 +32,13 @@ class AudioCapture {
         private const val READ_SAMPLES = 1_600 // 100 ms a 16 kHz (frames mono)
 
         // Energía RMS mínima por canal para confiar en la dirección (evita que
-        // el ruido de fondo invente un paneo en los silencios).
-        private const val PAN_RMS_FLOOR = 180.0
+        // el ruido de fondo invente un paneo en los silencios). Subido respecto
+        // al valor inicial para exigir voz clara, no murmullo de fondo.
+        private const val PAN_RMS_FLOOR = 450.0
+        // Diferencia L/R por debajo de la cual la voz se considera "al centro"
+        // (los microfonos del telefono estan muy juntos: diferencias minimas son
+        // ruido, no direccion real).
+        private const val PAN_DEAD_ZONE = 0.06f
     }
 
     private class Source(val record: AudioRecord, val stereo: Boolean)
@@ -97,7 +102,9 @@ class AudioCapture {
         val total = rmsL + rmsR
         if (rmsL < PAN_RMS_FLOOR && rmsR < PAN_RMS_FLOOR) return null
         if (total < 1.0) return null
-        return ((rmsR - rmsL) / total).toFloat().coerceIn(-1f, 1f)
+        val pan = ((rmsR - rmsL) / total).toFloat().coerceIn(-1f, 1f)
+        // Aplana la zona muerta central para no parpadear izquierda/derecha.
+        return if (kotlin.math.abs(pan) < PAN_DEAD_ZONE) 0f else pan
     }
 
     @SuppressLint("MissingPermission")
