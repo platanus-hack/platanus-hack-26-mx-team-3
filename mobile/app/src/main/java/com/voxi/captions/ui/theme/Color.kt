@@ -1,5 +1,6 @@
 package com.voxi.captions.ui.theme
 
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 
 // --- Acentos (paleta Voxi) ---
@@ -10,5 +11,22 @@ val VoxiMint = Color(0xFFC2EDE0)   // texto alto contraste / superficies suaves
 val VoxiSlate = Color(0xFF64748B)  // texto secundario / bordes / atenuado
 
 // --- Neutros oscuros ---
-val VoxiBg = Color(0xFF0A0E14)      // fondo
-val VoxiSurface = Color(0xFF121821) // tarjetas / barras
+val VoxiBg = Color(0xFF0A0E14)         // fondo base
+val VoxiBgElevated = Color(0xFF0E141D) // fondo con un punto mas de luz (gradiente)
+val VoxiSurface = Color(0xFF121821)    // tarjetas / barras
+val VoxiSurfaceHigh = Color(0xFF1A2330) // superficie elevada / campos
+val VoxiBorder = Color(0xFF243043)     // bordes sutiles sobre superficies
+
+// --- Gradientes / brushes reutilizables (spec §8: que se vea premium) ---
+
+/** Fondo principal: degradado vertical muy sutil para dar profundidad. */
+val VoxiBackground: Brush
+    get() = Brush.verticalGradient(listOf(VoxiBgElevated, VoxiBg))
+
+/** Degradado de marca para el logo y el boton "Decir". */
+val VoxiBrandGradient: Brush
+    get() = Brush.linearGradient(listOf(VoxiTeal, VoxiBlue))
+
+/** Halo radial suave detras del indicador de escucha. */
+fun speakerGradient(base: Color): Brush =
+    Brush.linearGradient(listOf(base.copy(alpha = 0.20f), base.copy(alpha = 0.04f)))

@@ -3,16 +3,23 @@ package com.voxi.captions
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,15 +28,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.background
-import androidx.compose.material3.MaterialTheme
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.voxi.captions.ui.screens.CameraScreen
 import com.voxi.captions.ui.screens.ConversationScreen
+import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
+import com.voxi.captions.ui.theme.VoxiBrandGradient
 import com.voxi.captions.ui.theme.VoxiSlate
 import com.voxi.captions.ui.theme.VoxiTheme
 import com.voxi.captions.viewmodel.ConversationViewModel
@@ -52,6 +60,14 @@ private fun VoxiApp() {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    // Avisos de exportacion (one-shot) -> Toast.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        viewModel.exportEvents.collect { result ->
+            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+        }
+    }
+
     var hasMicPermission by remember {
         mutableStateOf(
             context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
@@ -107,6 +123,7 @@ private fun VoxiApp() {
             onSelectSpeaker = viewModel::setSpeaker,
             onSend = viewModel::speak,
             onToggleCamera = onToggleCamera,
+            onExport = { viewModel.exportConversation(context) },
         )
     }
 }
@@ -116,25 +133,46 @@ private fun PermissionRequest(onRequest: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(VoxiBg)
-            .padding(24.dp),
+            .background(VoxiBackground)
+            .padding(28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(CircleShape)
+                .background(VoxiBrandGradient),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "V",
+                style = MaterialTheme.typography.headlineSmall,
+                color = VoxiBg,
+            )
+        }
+        Spacer(Modifier.size(20.dp))
         Text(
             text = "Voxi",
             style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.primary,
         )
         Text(
-            text = "Para mostrar los subtítulos en vivo, Voxi necesita acceso al micrófono.",
+            text = "Subtitulos en vivo, con el tono y el lugar de cada voz. " +
+                "Para empezar, Voxi necesita acceso al microfono.",
             style = MaterialTheme.typography.bodyLarge,
             color = VoxiSlate,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(vertical = 16.dp),
         )
-        Button(onClick = onRequest) {
-            Text("Permitir micrófono")
+        Button(
+            onClick = onRequest,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = VoxiBg,
+            ),
+        ) {
+            Text("Permitir microfono")
         }
     }
 }

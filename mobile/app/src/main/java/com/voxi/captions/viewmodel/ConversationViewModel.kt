@@ -1,11 +1,13 @@
 package com.voxi.captions.viewmodel
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.voxi.captions.audio.AudioCapture
 import com.voxi.captions.audio.ProsodyAnalyzer
 import com.voxi.captions.audio.VoskEngine
+import com.voxi.captions.export.TranscriptExporter
 import com.voxi.captions.model.Speaker
 import com.voxi.captions.model.Tone
 import com.voxi.captions.model.Utterance
@@ -15,8 +17,11 @@ import com.voxi.captions.vision.DetectedFace
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -38,6 +43,9 @@ data class ConversationUiState(
     val activeFace: DetectedFace? = null,
 )
 
+/** Resultado puntual de exportar, para mostrar un aviso de una sola vez (spec §10). */
+data class ExportResult(val success: Boolean, val message: String)
+
 class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private val vosk = VoskEngine()
@@ -49,6 +57,9 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _uiState = MutableStateFlow(ConversationUiState())
     val uiState: StateFlow<ConversationUiState> = _uiState.asStateFlow()
+
+    private val _exportEvents = MutableSharedFlow<ExportResult>(extraBufferCapacity = 1)
+    val exportEvents: SharedFlow<ExportResult> = _exportEvents.asSharedFlow()
 
     private var nextId = 0L
     private var captureJob: Job? = null
@@ -121,6 +132,19 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     /** Vía de regreso (spec §7): la persona sorda escribe y el teléfono lo dice. */
     fun speak(text: String) {
         tts.speak(text)
+    }
+
+    /** Exporta la conversación a un .txt en Descargas (spec §7 extra). */
+    fun exportConversation(context: Context) {
+        val utterances = _uiState.value.utterances
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = TranscriptExporter.export(context.applicationContext, utterances)
+            val event = result.fold(
+                onSuccess = { path -> ExportResult(true, "Conversacion guardada en $path") },
+                onFailure = { e -> ExportResult(false, e.message ?: "No se pudo exportar.") },
+            )
+            _exportEvents.emit(event)
+        }
     }
 
     /** Capa 3 Modo B: alterna entre el chat espacial y la vista de cámara. */
