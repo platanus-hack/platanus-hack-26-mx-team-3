@@ -57,6 +57,7 @@ class ProsodyAnalyzer {
     private var uttVolumeCount = 0
     private var uttEmphasis = false
     private val pitchTrack = ArrayList<Float>()
+    private val brightnessTrack = ArrayList<Float>()
 
     // Huella de voz de la última intervención cerrada.
     private var lastProfile = VoiceProfile.Unknown
@@ -78,6 +79,7 @@ class ProsodyAnalyzer {
         uttVolumeCount = 0
         uttEmphasis = false
         pitchTrack.clear()
+        brightnessTrack.clear()
     }
 
     /** Procesa un buffer PCM16 y actualiza el tono en vivo. */
@@ -112,6 +114,7 @@ class ProsodyAnalyzer {
                 ((pitchHz - PITCH_MIN_HZ) / (PITCH_MAX_HZ - PITCH_MIN_HZ)).coerceIn(0f, 1f)
             emaPitch = ema(emaPitch, pitchNorm)
             pitchTrack.add(pitchNorm)
+            brightnessTrack.add(spectralBrightness(buffer, length))
         }
 
         uttVolumeSum += volume
@@ -153,18 +156,41 @@ class ProsodyAnalyzer {
      */
     private fun buildProfile(avgVolume: Float): VoiceProfile {
         val voiced = pitchTrack.size >= MIN_VOICED_FRAMES
-        if (!voiced) return VoiceProfile(emaPitch, 0f, avgVolume, voiced = false)
+        if (!voiced) return VoiceProfile(emaPitch, 0f, 0.5f, avgVolume, voiced = false)
         val sorted = pitchTrack.sorted()
         val median = percentile(sorted, 0.5f)
         val q1 = percentile(sorted, 0.25f)
         val q3 = percentile(sorted, 0.75f)
         val spread = (q3 - q1).coerceIn(0f, 1f)
+        val brightness = if (brightnessTrack.isNotEmpty())
+            percentile(brightnessTrack.sorted(), 0.5f) else 0.5f
         return VoiceProfile(
             medianPitch = median,
             pitchSpread = spread,
+            brightness = brightness,
             meanVolume = avgVolume,
             voiced = true,
         )
+    }
+
+    /**
+     * Brillo/timbre: razón entre la energía de la señal derivada (altas
+     * frecuencias) y la señal original. Proxy barato del centroide espectral,
+     * sin FFT, que ayuda a separar voces con pitch parecido pero timbre distinto.
+     */
+    private fun spectralBrightness(buffer: ShortArray, length: Int): Float {
+        if (length < 2) return 0.5f
+        var e = 0.0
+        var d = 0.0
+        for (i in 1 until length) {
+            val s = buffer[i].toDouble()
+            e += s * s
+            val df = (buffer[i].toInt() - buffer[i - 1].toInt()).toDouble()
+            d += df * df
+        }
+        if (e < 1.0) return 0.5f
+        // d/e va de ~0 (grave) a ~4 (agudo, cerca de Nyquist). Normaliza a 0..1.
+        return (d / (4.0 * e)).toFloat().coerceIn(0f, 1f)
     }
 
     private fun percentile(sorted: List<Float>, p: Float): Float {

@@ -185,13 +185,21 @@ private fun CaptionOverlay(
             }
             else -> {
                 // Hay audio pero nadie en cuadro mueve la boca: alguien habla
-                // fuera de cuadro. Con microfono mono no se puede localizar la
-                // direccion, asi que mostramos un aviso honesto arriba en vez de
-                // inventar una posicion (spec: no prometer de mas).
+                // fuera de cuadro. Modo C (spec §6): si el microfono es estereo,
+                // el paneo L/R ubica el aviso del lado correcto; si no hay
+                // direccion (mono), cae al centro de forma honesta.
                 if (partial.isNotBlank()) {
+                    val dir = state.soundDirection
+                    val align = when {
+                        dir == null -> Alignment.TopCenter
+                        dir < -0.2f -> Alignment.TopStart
+                        dir > 0.2f -> Alignment.TopEnd
+                        else -> Alignment.TopCenter
+                    }
                     OffscreenBanner(
                         text = partial,
-                        modifier = Modifier.align(Alignment.TopCenter),
+                        direction = dir,
+                        modifier = Modifier.align(align),
                     )
                 }
                 return@BoxWithConstraints
@@ -270,20 +278,26 @@ private fun FaceMarker(modifier: Modifier = Modifier) {
     }
 }
 
-/** Aviso cuando se escucha a alguien que no esta en el encuadre. */
+/** Aviso cuando se escucha a alguien que no esta en el encuadre (Modo C). */
 @Composable
-private fun OffscreenBanner(text: String, modifier: Modifier = Modifier) {
+private fun OffscreenBanner(text: String, direction: Float?, modifier: Modifier = Modifier) {
     val shape = RoundedCornerShape(16.dp)
+    val label = when {
+        direction == null -> "Alguien fuera de cuadro"
+        direction < -0.2f -> "← Alguien a tu izquierda"
+        direction > 0.2f -> "Alguien a tu derecha →"
+        else -> "Alguien al frente, fuera de cuadro"
+    }
     Column(
         modifier = modifier
-            .padding(top = 72.dp)
-            .fillMaxWidth(0.85f)
+            .padding(top = 72.dp, start = 12.dp, end = 12.dp)
+            .fillMaxWidth(0.7f)
             .background(VoxiSurface.copy(alpha = 0.92f), shape)
             .border(1.dp, VoxiSlate.copy(alpha = 0.7f), shape)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Text(
-            text = "Alguien fuera de cuadro",
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             color = VoxiSlate,
         )

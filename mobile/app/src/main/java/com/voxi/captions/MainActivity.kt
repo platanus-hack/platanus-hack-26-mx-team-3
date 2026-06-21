@@ -36,6 +36,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.voxi.captions.ui.screens.CameraScreen
 import com.voxi.captions.ui.screens.ConversationScreen
 import com.voxi.captions.ui.screens.HistoryScreen
+import com.voxi.captions.ui.screens.VoiceSelectionScreen
 import com.voxi.captions.ui.theme.VoxiBackground
 import com.voxi.captions.ui.theme.VoxiBg
 import com.voxi.captions.ui.theme.VoxiBrandGradient
@@ -109,6 +110,10 @@ private fun VoxiApp() {
     }
 
     when {
+        state.needsVoiceSelection -> VoiceSelectionScreen(
+            onSelect = viewModel::setVoiceType,
+            modifier = Modifier.fillMaxSize(),
+        )
         !hasMicPermission -> PermissionRequest(
             onRequest = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
         )

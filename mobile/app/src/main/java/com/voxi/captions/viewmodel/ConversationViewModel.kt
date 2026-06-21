@@ -9,12 +9,15 @@ import com.voxi.captions.audio.ProsodyAnalyzer
 import com.voxi.captions.audio.VoskEngine
 import com.voxi.captions.data.ConversationStore
 import com.voxi.captions.data.SessionMeta
+import com.voxi.captions.data.SettingsStore
+import com.voxi.captions.data.SpeakerStore
 import com.voxi.captions.export.TranscriptExporter
 import com.voxi.captions.model.AnchoredCaption
 import com.voxi.captions.model.Origin
 import com.voxi.captions.model.Speaker
 import com.voxi.captions.model.Tone
 import com.voxi.captions.model.Utterance
+import com.voxi.captions.model.VoiceType
 import com.voxi.captions.tts.AndroidTts
 import com.voxi.captions.vision.ActiveSpeaker
 import com.voxi.captions.vision.DetectedFace
@@ -48,6 +51,11 @@ data class ConversationUiState(
     val faces: List<DetectedFace> = emptyList(),
     val activeFace: DetectedFace? = null,
     val anchoredCaption: AnchoredCaption? = null,
+    // Modo C (spec §6): direccion estimada del sonido (-1 izq .. +1 der) o null.
+    val soundDirection: Float? = null,
+    // Voz del TTS elegida al inicio (spec §7).
+    val voiceType: VoiceType = VoiceType.Default,
+    val needsVoiceSelection: Boolean = false,
     // Historial (spec §10)
     val showHistory: Boolean = false,
     val historySessions: List<SessionMeta> = emptyList(),
@@ -62,10 +70,11 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     private val vosk = VoskEngine()
     private val audio = AudioCapture()
     private val prosody = ProsodyAnalyzer()
-    private val speakers = SpeakerTracker()
+    private val speakers = SpeakerTracker(SpeakerStore(app))
     private val activeSpeaker = ActiveSpeaker()
     private val tts by lazy { AndroidTts(getApplication()) }
     private val store = ConversationStore(app)
+    private val settings = SettingsStore(app)
 
     private val _uiState = MutableStateFlow(ConversationUiState())
     val uiState: StateFlow<ConversationUiState> = _uiState.asStateFlow()
@@ -83,7 +92,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
     // Watchdog (spec §4): reinicia Vosk si hay audio pero no hay parciales.
     private var lastProgressMs = System.currentTimeMillis()
 
+    // Modo C: paneo L/R suavizado y si el dispositivo entrega direccion (estereo).
+    private var emaPan = 0f
+    private var hasPan = false
+
     init {
+        // Voz del TTS: aplica la elegida (o marca que falta elegir, 1a vez).
+        _uiState.update {
+            it.copy(voiceType = settings.voiceType, needsVoiceSelection = !settings.voiceChosen)
+        }
+        tts.setVoiceType(settings.voiceType)
         viewModelScope.launch {
             runCatching { vosk.load(getApplication()) }
                 .onSuccess { _uiState.update { it.copy(isModelLoading = false) } }
@@ -108,7 +126,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
             launch { runWatchdog() }
             runCatching {
                 var ttsMuted = false
-                audio.frames().collect { buffer ->
+                audio.frames().collect { frame ->
                     if (!vosk.isReady) return@collect
                     // Fix del eco del TTS (spec §7): mientras el telefono habla en
                     // voz alta, su propia voz entra por el microfono. Si la
@@ -132,9 +150,16 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                         prosody.reset()
                         return@collect
                     }
+                    // Modo C (spec §6): el paneo L/R de cada buffer estima la
+                    // direccion del sonido; se suaviza para ubicar al hablante
+                    // fuera de cuadro en la camara.
+                    frame.pan?.let { p ->
+                        emaPan = if (hasPan) emaPan * 0.8f + p * 0.2f else p
+                        hasPan = true
+                    }
                     // Un mismo buffer alimenta a Vosk y al análisis de tono (spec §2).
-                    prosody.feed(buffer, buffer.size)
-                    when (val r = vosk.accept(buffer, buffer.size)) {
+                    prosody.feed(frame.samples, frame.length)
+                    when (val r = vosk.accept(frame.samples, frame.length)) {
                         is VoskEngine.Recognition.Partial -> {
                             lastProgressMs = System.currentTimeMillis()
                             _uiState.update {
@@ -142,6 +167,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                                     partialText = r.text,
                                     partialTone = prosody.current(),
                                     partialSpeaker = speakers.currentSpeaker,
+                                    soundDirection = if (hasPan) emaPan else null,
                                 )
                             }
                         }
@@ -185,6 +211,14 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         scheduleSave()
     }
 
+    /** Elige el tipo de voz del TTS (masculina/femenina/neutral) y lo recuerda. */
+    fun setVoiceType(type: VoiceType) {
+        settings.voiceType = type
+        settings.voiceChosen = true
+        tts.setVoiceType(type)
+        _uiState.update { it.copy(voiceType = type, needsVoiceSelection = false) }
+    }
+
     /** Exporta la conversación a un .txt en Descargas (spec §7 extra). */
     fun exportConversation(context: Context) {
         val utterances = _uiState.value.utterances
@@ -203,7 +237,8 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
         saveNow()
         nextId = 0
         sessionId = System.currentTimeMillis()
-        speakers.reset()
+        // Reset suave: conserva las voces aprendidas (memoria tipo Alexa).
+        speakers.softReset()
         prosody.reset()
         _uiState.update {
             it.copy(
@@ -338,7 +373,7 @@ class ConversationViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     vosk.reset()
                     prosody.reset()
-                    speakers.reset()
+                    speakers.softReset()
                 }
                 lastProgressMs = System.currentTimeMillis()
                 _uiState.update { it.copy(statusMessage = "Reanudando…") }

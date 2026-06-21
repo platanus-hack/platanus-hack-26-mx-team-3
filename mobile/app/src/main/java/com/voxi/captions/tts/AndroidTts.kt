@@ -3,6 +3,7 @@ package com.voxi.captions.tts
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import com.voxi.captions.model.VoiceType
 import java.util.Locale
 
 /**
@@ -38,6 +39,11 @@ class AndroidTts(context: Context) {
     @Volatile
     private var quietUntil = 0L
 
+    // Tipo de voz elegido al inicio (masculina/femenina/neutral). Se aplica con
+    // tono y velocidad sobre el TTS nativo; a futuro mapea a ElevenLabs.
+    @Volatile
+    private var voiceType: VoiceType = VoiceType.Default
+
     /** ¿El teléfono está hablando ahora (o acaba de hablar dentro de la cola)? */
     val isSpeaking: Boolean
         get() = speaking || System.currentTimeMillis() < quietUntil
@@ -59,7 +65,22 @@ class AndroidTts(context: Context) {
         if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
             runCatching { tts.language = Locale.getDefault() }
         }
+        applyVoice()
         ready = true
+    }
+
+    /** Elige el tipo de voz (masculina/femenina/neutral) y lo aplica. */
+    fun setVoiceType(type: VoiceType) {
+        voiceType = type
+        applyVoice()
+    }
+
+    /** Traduce el [VoiceType] a tono y velocidad del motor nativo. */
+    private fun applyVoice() {
+        runCatching {
+            tts.setPitch(voiceType.ttsPitch)
+            tts.setSpeechRate(voiceType.ttsRate)
+        }
     }
 
     /** Marca [isSpeaking] mientras el motor reproduce cada frase. */
